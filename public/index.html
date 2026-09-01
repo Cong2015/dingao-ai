@@ -145,8 +145,8 @@
               <button id="chExportDocx" class="btn ghost small">💾 导出全文Word</button>
               <button id="chExportTxt" class="btn ghost small">导出txt</button>
             </div>
-            <textarea id="chEditor" placeholder="选择左侧章节开始写作。内容仅存本机数据库（不上传云端），自动保存，其他未授权用户无法查阅。"></textarea>
-            <div class="ch-meta"><span id="chCharCount">0 字</span><span class="privacy-note">🔒 仅存本机 · 不上云 · 未授权不可查阅</span></div>
+            <textarea id="chEditor" placeholder="选择左侧章节开始写作。内容仅存本浏览器本地（IndexedDB），不经过服务器、不上云，自动保存。"></textarea>
+            <div class="ch-meta"><span id="chCharCount">0 字</span><span class="privacy-note">🔒 论文仅存你自己的浏览器 · 服务器零存储</span></div>
           </section>
         </div>
       </div>
@@ -255,6 +255,8 @@
   </div>
 </div>
 
-<script src="app.js?v=4"></script>
+<script src="vendor/docx.iife.js?v=1"></script>
+<script src="dingao-local.js?v=1"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

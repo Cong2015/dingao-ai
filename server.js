@@ -1,12 +1,12 @@
-// 定稿AI 开发版 v0.3 — 后端服务
-// 范围（对应 R8 DoD V1.3 Must 清单）：
-//   PBI-21 M9 辅助选择题目（表单→3-5选题六要素→会话追问→一键采纳→自动生成标准章节结构）
-//   PBI-22 M10 辅助生成大纲（章-节两级·树编辑保存·txt/docx导出）
-//   PBI-23 M11 论文本地编写与Word备份（章节自动保存·全文导出docx·不上云·每用户隔离·管理员无内容查看权）
-//   PBI-24 M12 写作进度与打卡（确定性字数统计·进度条·每日打卡·连续天数）
-//   PBI-04 M4 互译 / PBI-20 M8 交稿检查报告 / PBI-05 工程地基（沿用 v0.2 实现）
+// 定稿AI 开发版 v0.4 — 后端服务（本地优先架构）
+// 范围（对应 R8 DoD V1.3 Must 清单；V1.4 架构修订）：
+//   PBI-21 M9 选题助手 / PBI-22 M10 大纲生成（纯中转：AI JSON，服务端不存会话与内容）
+//   PBI-23 M11 本地编写 / PBI-24 M12 进度打卡（V1.4起全部在用户浏览器 IndexedDB 本地实现，服务端无存储）
+//   PBI-04 M4 互译 / PBI-20 M8 交稿检查报告 / PBI-05 工程地基（沿用 v0.2/v0.3 实现）
 //   M2/M5/M6/M7 降级保留（S7/S8/C7/C8，功能仍可用）
-// 红线：内容0修改 · 论文全文仅存本机·不上云·未授权不可查阅（V1.3修订） · 密钥仅存服务端 · AI输出标注需人工核验
+// 红线（V1.4修订）：论文全文仅存用户自己电脑的浏览器本地（IndexedDB），服务端数据库不含任何论文数据；
+//   服务端仅存：账号/会话/用户API密钥/用户主动保存的工具结果记录。
+//   内容0修改 · 密钥仅存服务端 · AI输出标注需人工核验
 // 修复（v0.1诊断，v0.2实测校准）：校对按块执行避免整篇超时；检测finish_reason=length与空输出并自动细分重试；
 // max_tokens默认不设（V4推理模型思考与答案共用预算，显式小值会饿死答案：2500字块0.8s/完整输出 vs 4096上限0.4s/空输出）
 import express from 'express';
@@ -87,29 +87,10 @@ CREATE TABLE IF NOT EXISTS records(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, type TEXT NOT NULL,
   title TEXT NOT NULL, input_len INTEGER NOT NULL, output TEXT NOT NULL,
   created_at TEXT DEFAULT (datetime('now','localtime')));
-CREATE TABLE IF NOT EXISTS theses(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
-  title TEXT NOT NULL DEFAULT '我的论文', topic TEXT DEFAULT '',
-  target_words INTEGER DEFAULT 30000,
-  created_at TEXT DEFAULT (datetime('now','localtime')), updated_at TEXT DEFAULT (datetime('now','localtime')));
-CREATE TABLE IF NOT EXISTS chapters(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, thesis_id INTEGER NOT NULL,
-  parent_id INTEGER DEFAULT 0, title TEXT NOT NULL, content TEXT DEFAULT '',
-  status TEXT DEFAULT 'todo', sort INTEGER DEFAULT 0);
-CREATE TABLE IF NOT EXISTS checkins(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
-  date TEXT NOT NULL, word_delta INTEGER DEFAULT 0, total_words INTEGER DEFAULT 0,
-  note TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now','localtime')),
-  UNIQUE(user_id, date));
-CREATE TABLE IF NOT EXISTS topic_sessions(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
-  form TEXT DEFAULT '', topics TEXT DEFAULT '', status TEXT DEFAULT 'active',
-  created_at TEXT DEFAULT (datetime('now','localtime')));
-CREATE TABLE IF NOT EXISTS topic_messages(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL,
-  role TEXT NOT NULL, content TEXT NOT NULL,
-  created_at TEXT DEFAULT (datetime('now','localtime')));
 `);
+// v0.4 本地优先架构：论文全文/大纲/进度/打卡全部存用户浏览器 IndexedDB（见 public/dingao-local.js），
+// 服务端数据库只保留：用户账号、会话、用户API密钥、用户主动保存的工具结果记录（records）。
+// 原 v0.3 的 theses/chapters/checkins/topic_sessions/topic_messages 五表已随架构调整移除。
 const userCols = db.prepare(`PRAGMA table_info(users)`).all().map((c) => c.name);
 if (!userCols.includes('is_admin')) db.exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0`);
 
@@ -135,17 +116,7 @@ function rateLimit(req, res, next) {
   next();
 }
 
-// ---------- 写作辅助：字数统计/JSON解析/论文归属（M9-M12） ----------
-function wordCount(t) {
-  const s = String(t || '');
-  const cjk = (s.match(/[一-鿿　-〿＀-￯]/g) || []).length;
-  const latin = (s.replace(/[一-鿿　-〿＀-￯]/g, ' ').match(/[A-Za-z0-9]+/g) || []).length;
-  return cjk + latin;
-}
-function localDate(d = new Date()) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
+// ---------- AI JSON 解析（选题/大纲中转用；论文数据不落服务端） ----------
 const topicSixOk = (t) => !!t.title && !!t.research_question && Array.isArray(t.innovation_points) && !!t.relation_to_literature && !!t.feasibility && Array.isArray(t.reasons);
 function parseAiJson(content) {
   let s = String(content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
@@ -153,29 +124,6 @@ function parseAiJson(content) {
   const a = s.indexOf('{'), b = s.lastIndexOf('}');
   if (a >= 0 && b > a) { try { return { ok: true, data: JSON.parse(s.slice(a, b + 1)) }; } catch {} }
   return { ok: false };
-}
-// 论文归属：每用户一篇；所有章节查询都经 JOIN 校验归属（未授权不可查阅 L-4）
-function thesisFor(userId) {
-  const t = db.prepare('SELECT * FROM theses WHERE user_id=? ORDER BY id DESC LIMIT 1').get(userId);
-  if (t) return t;
-  const r = db.prepare('INSERT INTO theses(user_id, title) VALUES(?,?)').run(userId, '我的论文');
-  return db.prepare('SELECT * FROM theses WHERE id=?').get(Number(r.lastInsertRowid));
-}
-function standardChapters(thesisId) {
-  const titles = ['第1章 绪论', '第2章 文献综述与理论基础', '第3章 研究方法', '第4章 案例研究与数据分析', '第5章 结论与展望'];
-  db.prepare('DELETE FROM chapters WHERE thesis_id=?').run(thesisId);
-  titles.forEach((t, i) => db.prepare('INSERT INTO chapters(thesis_id, parent_id, title, sort) VALUES(?,0,?,?)').run(thesisId, t, i));
-}
-function chapterTree(thesisId) {
-  const rows = db.prepare('SELECT id, parent_id, title, content, status, sort FROM chapters WHERE thesis_id=? ORDER BY sort, id').all(thesisId);
-  const byId = new Map();
-  for (const r of rows) byId.set(r.id, { ...r, children: [] });
-  const out = [];
-  for (const r of rows) {
-    if (r.parent_id && byId.has(r.parent_id)) byId.get(r.parent_id).children.push(byId.get(r.id));
-    else out.push(byId.get(r.id));
-  }
-  return out;
 }
 
 // ---------- 提示词（内容0修改红线内置于系统提示） ----------
@@ -719,12 +667,14 @@ if (IS_TEST) {
 }
 
 // ============================================================
-// 写作全流程（V1.3 新增）：M9 选题 → M10 大纲 → M11 编写 → M12 进度
-// 隐私红线：全部数据仅存本机 SQLite；所有查询按 user_id 归属隔离，
-// 跨用户访问一律 404；不存在任何管理员查看他人论文内容的接口。
+// 写作全流程 AI 中转（v0.4 本地优先：纯转发·绝不落盘）
+// 隐私红线（V1.4修订）：论文全文/大纲/进度/打卡仅存用户浏览器 IndexedDB；
+// 服务端没有任何论文数据——以下端点对输入内容仅内存中转调用 DeepSeek，绝不写入数据库。
+// 注：v0.3 的 /api/thesis /api/chapters /api/outline(树) /api/progress /api/checkins
+//     已在 v0.4 移除（论文数据不再经过服务器存储，改由前端本地库实现）。
 // ============================================================
 
-// ---------- M9 选题助手（非流式JSON：表单→3-5选题六要素；会话追问；采纳） ----------
+// ---------- M9 选题助手（纯中转：表单→3-5选题六要素JSON；追问由前端携带历史） ----------
 app.post('/api/topics/suggest', rateLimit, async (req, res) => {
   const form = (req.body || {}).form || {};
   const problem = String(form.problem || '').trim();
@@ -738,7 +688,7 @@ app.post('/api/topics/suggest', rateLimit, async (req, res) => {
   if (!r.ok) return res.status(502).json({ error: r.error });
   const parsed = parseAiJson(r.content);
   if (!parsed.ok || !Array.isArray(parsed.data.topics) || !parsed.data.topics.length) {
-    return res.status(502).json({ error: 'AI未按约定格式返回选题（JSON解析失败），请重试或调整问题描述', raw: r.content.slice(0, 500) });
+    return res.status(502).json({ error: 'AI未按约定格式返回选题（JSON解析失败），请重试或调整问题描述' });
   }
   let topics = parsed.data.topics.slice(0, 5).map((t, i) => ({ index: t.index ?? i + 1, ...t }));
   // T-6 口径：六要素齐全率≥80%，不足时自动带修正要求重试一次（V4生成有随机性）
@@ -749,65 +699,38 @@ app.post('/api/topics/suggest', rateLimit, async (req, res) => {
       if (p2.ok && Array.isArray(p2.data.topics) && p2.data.topics.length) topics = p2.data.topics.slice(0, 5).map((t, i) => ({ index: t.index ?? i + 1, ...t }));
     }
   }
-  const sess = db.prepare('INSERT INTO topic_sessions(user_id, form, topics) VALUES(?,?,?)')
-    .run(id, JSON.stringify(form), JSON.stringify(topics));
-  const sessionId = Number(sess.lastInsertRowid);
-  db.prepare('INSERT INTO topic_messages(session_id, role, content) VALUES(?,\'user\',?)').run(sessionId, '【选题请求】' + problem.slice(0, 1000));
-  db.prepare('INSERT INTO topic_messages(session_id, role, content) VALUES(?,\'assistant\',?)').run(sessionId, JSON.stringify(topics));
-  ok(res, { session_id: sessionId, topics, model: r.model, aiNote: '选题由AI生成，需人工核验' });
+  ok(res, { topics, model: r.model, aiNote: '选题由AI生成，需人工核验；输入仅内存中转，服务端不存储' });
 });
-app.post('/api/topics/sessions/:sid/messages', rateLimit, async (req, res) => {
+// 追问迭代（纯中转：前端携带会话历史，服务端不存会话）
+app.post('/api/topics/iterate', rateLimit, async (req, res) => {
+  const { history, question } = req.body || {};
+  const q = String(question || '').trim();
+  if (!q) return res.status(400).json({ error: '请输入追问内容' });
+  if (q.length > 4000) return res.status(400).json({ error: '追问过长（≤4000字）' });
   const id = requireAuth(req, res); if (!id) return;
-  const content = String((req.body || {}).content || '').trim();
-  if (!content) return res.status(400).json({ error: '请输入追问内容' });
-  if (content.length > 4000) return res.status(400).json({ error: '追问过长（≤4000字）' });
-  const sess = db.prepare('SELECT * FROM topic_sessions WHERE id=? AND user_id=?').get(Number(req.params.sid), id);
-  if (!sess) return res.status(404).json({ error: '会话不存在' });
   const rk = resolveKeyFor(id);
   if (!rk) return res.status(403).json({ error: 'AI功能需要API Key：请先在「我的Key」配置你自己的DeepSeek密钥并完成本地核对' });
-  const msgs = db.prepare('SELECT role, content FROM topic_messages WHERE session_id=? ORDER BY id').all(sess.id);
-  const history = msgs.map((m) => `${m.role === 'user' ? '用户' : 'AI'}：${m.content.slice(0, 1500)}`).join('\n');
-  const r = await dsCall('topic', history + '\n用户追问：' + content, { form: JSON.parse(sess.form || '{}'), responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
+  const hist = Array.isArray(history)
+    ? history.map((m) => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 1500)}`).join('\n')
+    : String(history || '').slice(0, 8000);
+  const r = await dsCall('topic', hist + '\n用户追问：' + q, { form: {}, responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
   if (!r.ok) return res.status(502).json({ error: r.error });
   const parsed = parseAiJson(r.content);
   if (!parsed.ok || !Array.isArray(parsed.data.topics) || !parsed.data.topics.length) {
-    return res.status(502).json({ error: 'AI未按约定格式返回选题（JSON解析失败），请重试', raw: r.content.slice(0, 500) });
+    return res.status(502).json({ error: 'AI未按约定格式返回选题（JSON解析失败），请重试' });
   }
   let topics = parsed.data.topics.slice(0, 5);
   if (topics.filter(topicSixOk).length < Math.ceil(topics.length * 0.8)) {
-    const r2 = await dsCall('topic', history + '\n用户追问：' + content + '（修正要求：每个选题必须完整包含 title/research_question/innovation_points/relation_to_literature/feasibility(data_availability/method_maturity/time_estimate)/reasons 全部6个字段，请自查后重新输出）', { form: JSON.parse(sess.form || '{}'), responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
+    const r2 = await dsCall('topic', hist + '\n用户追问：' + q + '（修正要求：每个选题必须完整包含 title/research_question/innovation_points/relation_to_literature/feasibility(data_availability/method_maturity/time_estimate)/reasons 全部6个字段，请自查后重新输出）', { form: {}, responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
     if (r2.ok) {
       const p2 = parseAiJson(r2.content);
       if (p2.ok && Array.isArray(p2.data.topics) && p2.data.topics.length) topics = p2.data.topics.slice(0, 5);
     }
   }
-  db.prepare('UPDATE topic_sessions SET topics=? WHERE id=?').run(JSON.stringify(topics), sess.id);
-  db.prepare('INSERT INTO topic_messages(session_id, role, content) VALUES(?,\'user\',?)').run(sess.id, content);
-  db.prepare('INSERT INTO topic_messages(session_id, role, content) VALUES(?,\'assistant\',?)').run(sess.id, JSON.stringify(topics));
-  ok(res, { topics, model: r.model, aiNote: '选题由AI生成，需人工核验' });
-});
-app.get('/api/topics/sessions', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const rows = db.prepare('SELECT id, status, topics, created_at FROM topic_sessions WHERE user_id=? AND status=\'active\' ORDER BY id DESC LIMIT 10').all(id);
-  ok(res, rows.map((r) => ({ id: r.id, status: r.status, topics: JSON.parse(r.topics || '[]'), created_at: r.created_at })));
-});
-app.post('/api/topics/adopt', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const { session_id, topic_index } = req.body || {};
-  const sess = db.prepare('SELECT * FROM topic_sessions WHERE id=? AND user_id=?').get(Number(session_id), id);
-  if (!sess) return res.status(404).json({ error: '会话不存在' });
-  const topics = JSON.parse(sess.topics || '[]');
-  const topic = topics.find((t) => Number(t.index) === Number(topic_index));
-  if (!topic) return res.status(400).json({ error: '选题不存在，请重新选择' });
-  const thesis = thesisFor(id);
-  const title = String(topic.title || '我的论文').slice(0, 100);
-  db.prepare('UPDATE theses SET title=?, topic=?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(title, title, thesis.id);
-  standardChapters(thesis.id);   // 采纳后自动生成标准章节结构（衔接 M10 大纲）
-  db.prepare('UPDATE topic_sessions SET status=? WHERE id=?').run('adopted', sess.id);
-  ok(res, { message: '已采纳选题，并生成标准章节结构', thesis_id: thesis.id, title, chapter_count: chapterTree(thesis.id).length });
+  ok(res, { topics, model: r.model, aiNote: '选题由AI生成，需人工核验；输入仅内存中转，服务端不存储' });
 });
 
-// ---------- M10 大纲（AI生成章-节两级；树编辑保存；导出） ----------
+// ---------- M10 大纲生成（纯中转：AI章-节两级JSON；树编辑与导出在前端本地库） ----------
 app.post('/api/outline/generate', rateLimit, async (req, res) => {
   const id = requireAuth(req, res); if (!id) return;
   const title = String((req.body || {}).title || '').trim();
@@ -822,188 +745,6 @@ app.post('/api/outline/generate', rateLimit, async (req, res) => {
   }
   ok(res, { chapters: parsed.data.chapters.slice(0, 12), model: r.model, aiNote: '大纲由AI生成，需人工核验；应用后可在「大纲」页继续编辑' });
 });
-app.get('/api/outline', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const thesis = thesisFor(id);
-  ok(res, { thesis_id: thesis.id, title: thesis.title, topic: thesis.topic, chapters: chapterTree(thesis.id) });
-});
-// 保存大纲树（整树替换：已有id保留内容只改标题/层级；新节点负id插入；缺失节点删除）
-app.put('/api/outline', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const { chapters } = req.body || {};
-  if (!Array.isArray(chapters) || !chapters.length) return res.status(400).json({ error: '大纲不能为空' });
-  const thesis = thesisFor(id);
-  const keep = new Set();
-  const walk = (list, parentDbId) => {
-    for (const c of list) {
-      const cid = Number(c.id);
-      const title = String(c.title || '').trim().slice(0, 100) || '未命名章节';
-      let dbId;
-      if (cid > 0) {
-        const ex = db.prepare('SELECT id FROM chapters WHERE id=? AND thesis_id=?').get(cid, thesis.id);
-        if (!ex) throw new Error('章节不存在或不属于你，请刷新后重试');
-        dbId = cid;
-        db.prepare('UPDATE chapters SET title=?, parent_id=? WHERE id=?').run(title, parentDbId, dbId);
-      } else {
-        const r = db.prepare('INSERT INTO chapters(thesis_id, parent_id, title) VALUES(?,?,?)').run(thesis.id, parentDbId, title);
-        dbId = Number(r.lastInsertRowid);
-      }
-      keep.add(dbId);
-      if (Array.isArray(c.children)) walk(c.children, dbId);
-    }
-  };
-  try { walk(chapters, 0); } catch (e) { return res.status(400).json({ error: e.message }); }
-  const all = db.prepare('SELECT id FROM chapters WHERE thesis_id=?').all(thesis.id);
-  for (const row of all) if (!keep.has(row.id)) db.prepare('DELETE FROM chapters WHERE id=?').run(row.id);
-  let s = 0;
-  for (const cid of keep) db.prepare('UPDATE chapters SET sort=? WHERE id=?').run(s++, cid);
-  db.prepare('UPDATE theses SET updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(thesis.id);
-  ok(res, { message: '大纲已保存', chapters: chapterTree(thesis.id) });
-});
-app.get('/api/outline/export', async (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const thesis = thesisFor(id);
-  const fmt = req.query.fmt === 'txt' ? 'txt' : 'docx';
-  const tree = chapterTree(thesis.id);
-  const fname = (thesis.title + '-大纲').replace(/[\\/:*?"<>|]/g, '_');
-  if (fmt === 'txt') {
-    let out = `${thesis.title}——大纲\n\n`;
-    const walk = (list, depth) => { for (const c of list) { out += `${'  '.repeat(depth)}${c.title}\n`; walk(c.children, depth + 1); } };
-    walk(tree, 0);
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}.txt"`);
-    return res.send(out);
-  }
-  const kids = [new Paragraph({ heading: HeadingLevel.TITLE, alignment: AlignmentType.CENTER, children: [new TextRun({ text: thesis.title + '（大纲）', bold: true, size: 32, font: { ascii: 'Microsoft YaHei', eastAsia: 'Microsoft YaHei' } })] })];
-  const walk = (list, depth) => { for (const c of list) {
-    kids.push(new Paragraph({ heading: depth === 0 ? HeadingLevel.HEADING_1 : HeadingLevel.HEADING_2, children: [new TextRun({ text: c.title, size: depth === 0 ? 28 : 26, font: { ascii: 'Microsoft YaHei', eastAsia: 'Microsoft YaHei' } })] }));
-    walk(c.children, depth + 1);
-  } };
-  walk(tree, 0);
-  const doc = new Document({ sections: [{ properties: { page: { size: { width: 11906, height: 16838 } } }, children: kids }] });
-  const buf = await Packer.toBuffer(doc);
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}.docx"`);
-  res.send(Buffer.from(buf));
-});
-
-// ---------- M11 本地编写（章节自动保存·全文导出Word备份·数据隔离） ----------
-app.get('/api/thesis', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const t = thesisFor(id);
-  ok(res, { id: t.id, title: t.title, topic: t.topic, target_words: t.target_words, updated_at: t.updated_at });
-});
-app.put('/api/thesis', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const t = thesisFor(id);
-  const title = String((req.body || {}).title || t.title).trim().slice(0, 100);
-  const target = Math.min(Math.max(Number((req.body || {}).target_words) || t.target_words, 1000), 1000000);
-  db.prepare('UPDATE theses SET title=?, target_words=?, updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(title, target, t.id);
-  ok(res, { message: '已保存', title, target_words: target });
-});
-app.get('/api/chapters/:cid', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const c = db.prepare('SELECT c.* FROM chapters c JOIN theses t ON t.id=c.thesis_id WHERE c.id=? AND t.user_id=?').get(Number(req.params.cid), id);
-  if (!c) return res.status(404).json({ error: '章节不存在' });
-  ok(res, c);
-});
-// 自动保存（内容/标题/状态任一字段）
-app.put('/api/chapters/:cid', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const c = db.prepare('SELECT c.* FROM chapters c JOIN theses t ON t.id=c.thesis_id WHERE c.id=? AND t.user_id=?').get(Number(req.params.cid), id);
-  if (!c) return res.status(404).json({ error: '章节不存在' });
-  const b = req.body || {};
-  const fields = [];
-  if (typeof b.content === 'string') fields.push(['content', String(b.content).slice(0, 1000000)]);
-  if (typeof b.title === 'string' && b.title.trim()) fields.push(['title', String(b.title).trim().slice(0, 100)]);
-  if (typeof b.status === 'string' && ['todo', 'writing', 'done'].includes(b.status)) fields.push(['status', b.status]);
-  if (!fields.length) return res.status(400).json({ error: '无可保存字段' });
-  db.prepare(`UPDATE chapters SET ${fields.map(([k]) => `${k}=?`).join(', ')} WHERE id=?`).run(...fields.map(([, v]) => v), c.id);
-  db.prepare('UPDATE theses SET updated_at=datetime(\'now\',\'localtime\') WHERE id=?').run(c.thesis_id);
-  ok(res, { message: '已保存', words: wordCount(typeof b.content === 'string' ? b.content : c.content) });
-});
-app.post('/api/chapters', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const thesis = thesisFor(id);
-  const title = String((req.body || {}).title || '').trim();
-  if (!title) return res.status(400).json({ error: '章节标题不能为空' });
-  const parent = Number((req.body || {}).parent_id) || 0;
-  if (parent) {
-    const p = db.prepare('SELECT id FROM chapters WHERE id=? AND thesis_id=?').get(parent, thesis.id);
-    if (!p) return res.status(400).json({ error: '父章节不存在' });
-  }
-  const r = db.prepare('INSERT INTO chapters(thesis_id, parent_id, title, sort) VALUES(?,?,?,?)').run(thesis.id, parent, title.slice(0, 100), 9999);
-  ok(res, { id: Number(r.lastInsertRowid), message: '章节已创建' });
-});
-app.delete('/api/chapters/:cid', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const c = db.prepare('SELECT c.* FROM chapters c JOIN theses t ON t.id=c.thesis_id WHERE c.id=? AND t.user_id=?').get(Number(req.params.cid), id);
-  if (!c) return res.status(404).json({ error: '章节不存在' });
-  db.prepare('DELETE FROM chapters WHERE id=? OR parent_id=?').run(c.id, c.id);
-  ok(res, { message: '章节已删除' });
-});
-// 全文导出 Word / txt（定期下载防丢失；确定性生成）
-app.get('/api/thesis/export', async (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const thesis = thesisFor(id);
-  const fmt = req.query.fmt === 'txt' ? 'txt' : 'docx';
-  const tree = chapterTree(thesis.id);
-  const fname = (thesis.title || '定稿AI论文').replace(/[\\/:*?"<>|]/g, '_');
-  if (fmt === 'txt') {
-    let out = `${thesis.title}\n\n`;
-    const walk = (list, depth) => { for (const c of list) { out += `${'#'.repeat(Math.min(depth + 1, 3))} ${c.title}\n${c.content || ''}\n\n`; walk(c.children, depth + 1); } };
-    walk(tree, 0);
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}.txt"`);
-    return res.send(out);
-  }
-  const kids = [new Paragraph({ heading: HeadingLevel.TITLE, alignment: AlignmentType.CENTER, children: [new TextRun({ text: thesis.title, bold: true, size: 36, font: { ascii: 'Microsoft YaHei', eastAsia: 'Microsoft YaHei' } })] })];
-  const walk = (list, depth) => { for (const c of list) {
-    kids.push(new Paragraph({ heading: depth === 0 ? HeadingLevel.HEADING_1 : HeadingLevel.HEADING_2, children: [new TextRun({ text: c.title, bold: true, size: depth === 0 ? 28 : 26, font: { ascii: 'Microsoft YaHei', eastAsia: 'Microsoft YaHei' } })] }));
-    if (c.content) for (const para of String(c.content).split(/\n+/)) if (para.trim()) kids.push(new Paragraph({ alignment: AlignmentType.JUSTIFIED, indent: { firstLine: 420 }, spacing: { line: 360 }, children: [new TextRun({ text: para.trim(), size: 24, font: { ascii: 'Times New Roman', eastAsia: 'SimSun' } })] }));
-    walk(c.children, depth + 1);
-  } };
-  walk(tree, 0);
-  const doc = new Document({ sections: [{ properties: { page: { size: { width: 11906, height: 16838 } } }, children: kids }] });
-  const buf = await Packer.toBuffer(doc);
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fname)}.docx"`);
-  res.send(Buffer.from(buf));
-});
-
-// ---------- M12 写作进度与打卡（确定性统计·零AI成本） ----------
-app.get('/api/progress', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const thesis = thesisFor(id);
-  const rows = db.prepare('SELECT id, parent_id, title, content, status, sort FROM chapters WHERE thesis_id=? ORDER BY sort, id').all(thesis.id);
-  const chapters = rows.map((r) => ({ id: r.id, parent_id: r.parent_id, title: r.title, status: r.status, words: wordCount(r.content) }));
-  const total = chapters.reduce((a, b) => a + b.words, 0);
-  const target = thesis.target_words;
-  ok(res, { thesis_id: thesis.id, title: thesis.title, target_words: target, total_words: total, percent: target ? Math.min(100, Math.round((total / target) * 1000) / 10) : 0, chapters, chapter_count: chapters.length, rule: '确定性统计（零AI成本）' });
-});
-app.post('/api/checkins', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const note = String((req.body || {}).note || '').trim().slice(0, 200);
-  const thesis = thesisFor(id);
-  const rows = db.prepare('SELECT content FROM chapters WHERE thesis_id=?').all(thesis.id);
-  const total = rows.reduce((a, b) => a + wordCount(b.content), 0);
-  const last = db.prepare('SELECT total_words FROM checkins WHERE user_id=? ORDER BY date DESC LIMIT 1').get(id);
-  const delta = Math.max(0, total - (last ? last.total_words : 0));
-  const date = localDate();
-  db.prepare('INSERT INTO checkins(user_id, date, word_delta, total_words, note) VALUES(?,?,?,?,?) ON CONFLICT(user_id, date) DO UPDATE SET word_delta=excluded.word_delta, total_words=excluded.total_words, note=excluded.note').run(id, date, delta, total, note);
-  ok(res, { date, word_delta: delta, total_words: total, message: `打卡成功：今日已写 ${delta} 字` });
-});
-app.get('/api/checkins', (req, res) => {
-  const id = requireAuth(req, res); if (!id) return;
-  const rows = db.prepare('SELECT date, word_delta, total_words, note FROM checkins WHERE user_id=? ORDER BY date DESC LIMIT 90').all(id);
-  const days = new Set(rows.map((r) => r.date));
-  let streak = 0;
-  const d = new Date();
-  if (!days.has(localDate(d))) d.setDate(d.getDate() - 1);
-  while (days.has(localDate(d))) { streak++; d.setDate(d.getDate() - 1); }
-  ok(res, { checkins: rows, streak, rule: '确定性统计（零AI成本）' });
-});
-
 // 健康与能力清单
 function lanUrls() {
   const out = [];
@@ -1014,11 +755,11 @@ function lanUrls() {
   }
   return [...new Set(out)];
 }
-app.get('/api/health', (req, res) => ok(res, { status: 'ok', version: '0.3', models: MODELS, hasKey: !!API_KEY, lanUrls: lanUrls(), local: `http://localhost:${PORT}`, time: new Date().toISOString() }));
+app.get('/api/health', (req, res) => ok(res, { status: 'ok', version: '0.4', models: MODELS, hasKey: !!API_KEY, lanUrls: lanUrls(), local: `http://localhost:${PORT}`, privacy: '论文数据仅存用户浏览器本地，服务端不存储论文内容', time: new Date().toISOString() }));
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[定稿AI v0.3] 服务已启动 http://0.0.0.0:${PORT}`);
-  for (const u of lanUrls()) console.log(`[定稿AI v0.3] 本机访问 ${u} （其他电脑请用此地址，需防火墙放行 TCP ${PORT}）`);
-  console.log(`[定稿AI v0.3] DeepSeek密钥：${API_KEY ? '已加载' : '未配置（功能将返回503）'} · 数据库：${DB_PATH}`);
-  if (IS_TEST) console.log('[定稿AI v0.3] 测试模式');
+  console.log(`[定稿AI v0.4] 服务已启动 http://0.0.0.0:${PORT}`);
+  for (const u of lanUrls()) console.log(`[定稿AI v0.4] 本机访问 ${u} （其他电脑请用此地址，需防火墙放行 TCP ${PORT}）`);
+  console.log(`[定稿AI v0.4] DeepSeek密钥：${API_KEY ? '已加载' : '未配置（功能将返回503）'} · 数据库：${DB_PATH}（仅账号/密钥/记录，无论文数据）`);
+  if (IS_TEST) console.log('[定稿AI v0.4] 测试模式');
 });

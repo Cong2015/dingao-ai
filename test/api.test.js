@@ -1,7 +1,9 @@
-// 定稿AI 测试工程师 · 自动化测试套件 v0.3（功能/合规/安全/AI场景）
+// 定稿AI 测试工程师 · 自动化测试套件 v0.4（功能/合规/安全/AI场景·本地优先架构）
 // 运行：node test/api.test.js  （自动拉起 8789 测试实例，结束后回收）
-// v0.2 已有：M5分段校对E2E回归（长文本不超时）/ 切块完整性 / M2序号修正与去重 / M8交稿检查报告 / docx格式元数据
-// v0.3 新增：M9选题(真实AI六要素/追问/采纳) / M10大纲(生成/树保存/导出) / M11编写(自动保存/导出docx确定性) / M12进度打卡 / 隐私隔离(跨用户404/管理员无内容查看权)
+// v0.2/v0.3 已有：M5分段校对E2E回归 / 切块完整性 / M2序号修正 / M8交稿检查报告 / 选题AI / 大纲AI
+// v0.4 变更：论文数据移入用户浏览器 IndexedDB——服务端存储端点全删（404断言）、测试库无论文表（sqlite_master断言）、
+//   选题/大纲纯中转（响应无session_id）、本地核心库单测（dingao-local.js 同一份代码 node 侧执行）、
+//   docx 浏览器构建导出（zip魔数/标题层级/两次一致性）、前端本地优先完整性断言
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,7 +35,8 @@ async function req(path_, opt = {}) {
   const headers = { ...(opt.headers || {}) };
   if (opt.token) headers.Authorization = `Bearer ${opt.token}`;
   if (opt.body && typeof opt.body === 'string' && !opt.raw) headers['Content-Type'] = 'application/json';
-  const r = await fetch(BASE + path_, { ...opt, headers, signal: AbortSignal.timeout(30000) });
+  const { timeoutMs, ...rest } = opt;
+  const r = await fetch(BASE + path_, { ...rest, headers, signal: AbortSignal.timeout(timeoutMs || 30000) });
   let data = null;
   const ct = r.headers.get('content-type') || '';
   if (ct.includes('json')) data = await r.json().catch(() => null);
@@ -86,7 +89,7 @@ check('TC-06 未登录访问被拒(401)', r.status === 401);
 r = await req('/api/auth/me', { token });
 check('TC-07 登录态获取用户信息', r.status === 200 && r.data.username === uname);
 r = await req('/api/health');
-check('TC-08 健康检查(无需登录,v0.3)', r.status === 200 && r.data.hasKey === true && r.data.version === '0.3' && Array.isArray(r.data.lanUrls));
+check('TC-08 健康检查(无需登录,v0.4)', r.status === 200 && r.data.hasKey === true && r.data.version === '0.4' && Array.isArray(r.data.lanUrls) && String(r.data.privacy).includes('不存储'));
 
 // ===== 用例组2：引用核查（规则引擎·确定性） =====
 console.log('[测试] 组2 引用核查规则引擎…');
@@ -250,7 +253,7 @@ check('TC-67 写作四视图前端逻辑存在', appjs.includes('saveChapter') &
 check('TC-68 撤销栈上限7次(PRD AC4)', appjs.includes('> 7') && appjs.includes('pushHistory'));
 check('TC-69 前端无内嵌密钥与明文Key', !/sk-[A-Za-z0-9]{16,}/.test(appjs) && !/sk-[A-Za-z0-9]{16,}/.test(idx));
 
-// ===== 用例组12：M9 选题助手（真实DeepSeek调用，约需1-2分钟） =====
+// ===== 用例组12：M9 选题助手（v0.4纯中转·真实DeepSeek调用，约需1-2分钟） =====
 console.log('[测试] 组12 M9选题助手（真实DeepSeek，约需1-2分钟）…');
 const topicForm = {
   problem: '某商业TOD项目在施工阶段，建设单位需要同时协调开发商、政府、轨道交通公司、运营商与商户五方主体，经常出现界面责任不清、信息传递延迟导致的工期延误。',
@@ -259,119 +262,89 @@ const topicForm = {
   interests: '多方协同、界面管理',
   count: 5,
 };
-let tp = await req('/api/topics/suggest', { method: 'POST', body: JSON.stringify({ form: topicForm }), token, headers: {} });
-check('TC-70 选题建议生成成功(3-5个)', tp.status === 200 && tp.data.session_id > 0 && tp.data.topics.length >= 3 && tp.data.topics.length <= 5, JSON.stringify(tp.data).slice(0, 200));
+let tp = await req('/api/topics/suggest', { method: 'POST', body: JSON.stringify({ form: topicForm }), token, timeoutMs: 240000 });
+check('TC-70 选题建议生成成功(3-5个)', tp.status === 200 && Array.isArray(tp.data.topics) && tp.data.topics.length >= 3 && tp.data.topics.length <= 5, JSON.stringify(tp.data).slice(0, 200));
+check('TC-71 纯中转无会话落库(响应无session_id)', tp.status === 200 && !('session_id' in tp.data) && String(tp.data.aiNote).includes('不存储'));
 const sixOk = (t) => !!t.title && !!t.research_question && Array.isArray(t.innovation_points) && !!t.relation_to_literature && !!t.feasibility && !!t.reasons;
-check('TC-71 选题六要素齐全率≥80%', tp.status === 200 && tp.data.topics.filter(sixOk).length >= Math.ceil(tp.data.topics.length * 0.8), JSON.stringify(tp.data.topics?.[0] || {}).slice(0, 300));
-let tp2 = await req(`/api/topics/sessions/${tp.data?.session_id}/messages`, { method: 'POST', body: JSON.stringify({ content: '哪个方向的数据最容易获取？' }), token });
-check('TC-72 追问迭代成功(重新返回选题)', tp2.status === 200 && Array.isArray(tp2.data.topics) && tp2.data.topics.length >= 1);
-let tp3 = await req(`/api/topics/sessions/${tp.data?.session_id}/messages`, { method: 'POST', body: JSON.stringify({ content: '试试呢' }), token: r2l.data.token });
-check('TC-73 他人会话不可追问(404)', tp3.status === 404);
-const adoptIdx = tp.status === 200 ? tp.data.topics[0].index : 1;
-let ad = await req('/api/topics/adopt', { method: 'POST', body: JSON.stringify({ session_id: tp.data?.session_id, topic_index: adoptIdx }), token });
-check('TC-74 采纳选题→生成标准章节结构(≥5章)', ad.status === 200 && ad.data.chapter_count >= 5 && !!ad.data.title, JSON.stringify(ad.data));
+check('TC-72 选题六要素齐全率≥80%', tp.status === 200 && tp.data.topics.filter(sixOk).length >= Math.ceil(tp.data.topics.length * 0.8), JSON.stringify(tp.data.topics?.[0] || {}).slice(0, 300));
+const tpHist = [{ role: 'user', content: topicForm.problem.slice(0, 200) }, { role: 'assistant', content: '已生成选题' }];
+let tp2 = await req('/api/topics/iterate', { method: 'POST', body: JSON.stringify({ history: tpHist, question: '哪个方向的数据最容易获取？' }), token, timeoutMs: 240000 });
+check('TC-73 追问迭代成功(前端携带历史)', tp2.status === 200 && Array.isArray(tp2.data.topics) && tp2.data.topics.length >= 1);
+let tp3 = await req('/api/topics/iterate', { method: 'POST', body: JSON.stringify({ history: '随意内容', question: '' }), token });
+check('TC-74 空追问被拒(400)', tp3.status === 400);
 
-// ===== 用例组13：M10 大纲 =====
-console.log('[测试] 组13 M10大纲（真实DeepSeek生成一次）…');
-let og = await req('/api/outline/generate', { method: 'POST', body: JSON.stringify({ title: ad.data?.title || 'TOD项目多方协同管理研究', extra: '关键词：界面管理；利益分配' }), token });
+// ===== 用例组13：M10 大纲生成（纯中转）+ 本地优先架构断言 =====
+console.log('[测试] 组13 M10大纲与本地优先架构…');
+let og = await req('/api/outline/generate', { method: 'POST', body: JSON.stringify({ title: 'TOD项目多方协同管理研究', extra: '关键词：界面管理；利益分配' }), token, timeoutMs: 240000 });
 check('TC-75 AI生成大纲成功(≥5章含小节)', og.status === 200 && og.data.chapters.length >= 5 && og.data.chapters.every((c) => c.title), JSON.stringify(og.data).slice(0, 200));
-let ol0 = await req('/api/outline', { token });
-check('TC-76 获取当前大纲(含采纳后的标准章节)', ol0.status === 200 && Array.isArray(ol0.data.chapters) && ol0.data.chapters.length >= 5);
-const newTree = ol0.data.chapters.map((c, i) => ({ ...c, children: (c.children || []).concat(i === 0 ? [{ id: -1, parent_id: c.id, title: '1.1 研究背景', content: '', status: 'todo', children: [] }] : []) }));
-let ol1 = await req('/api/outline', { method: 'PUT', body: JSON.stringify({ chapters: newTree }), token });
-check('TC-77 大纲树保存(新增子节/整树回写)', ol1.status === 200 && ol1.data.chapters[0].children.length >= 1 && ol1.data.chapters[0].children[0].title === '1.1 研究背景');
-let ol2 = await req('/api/outline/export?fmt=txt', { token });
-check('TC-78 大纲导出txt(含章与子节)', ol2.status === 200 && ol2.data.includes('1.1 研究背景'));
-let ol3 = await req('/api/outline/export?fmt=docx', { token });
-check('TC-79 大纲导出docx(合法zip)', ol3.status === 200 && ol3.data[0] === 0x50 && ol3.data[1] === 0x4b);
-let ol4 = await req('/api/outline', { method: 'PUT', body: JSON.stringify({ chapters: [] }), token });
-check('TC-80 空大纲保存被拒(400)', ol4.status === 400);
-
-// ===== 用例组14：M11 本地编写与Word备份 =====
-console.log('[测试] 组14 M11本地编写与Word备份…');
-let th = await req('/api/thesis', { token });
-check('TC-81 获取论文信息(标题=采纳选题)', th.status === 200 && th.data.title === ad.data.title);
-let th2 = await req('/api/thesis', { method: 'PUT', body: JSON.stringify({ title: '新标题测试', target_words: 30000 }), token });
-check('TC-82 更新论文标题与目标字数', th2.status === 200 && th2.data.title === '新标题测试' && th2.data.target_words === 30000);
-const ch = ol1.data.chapters[0];
-const testContent = '研究背景：随着城市轨道交通发展，TOD模式成为主流。本研究聚焦建设单位多方协同问题，采用案例研究方法。\n\n第二段：介绍利益相关者理论。测试内容 abc123。';
-let ch1 = await req('/api/chapters/' + ch.id, { token });
-check('TC-83 读取章节内容', ch1.status === 200 && ch1.data.title === ch.title);
-let ch2 = await req('/api/chapters/' + ch.id, { method: 'PUT', body: JSON.stringify({ content: testContent, status: 'writing' }), token });
-check('TC-84 章节自动保存(回读一致+字数统计)', ch2.status === 200 && ch2.data.words > 0);
-let ch3 = await req('/api/chapters/' + ch.id, { token });
-check('TC-85 保存后内容回读100%一致', ch3.status === 200 && ch3.data.content === testContent && ch3.data.status === 'writing');
-let ch4 = await req('/api/chapters', { method: 'POST', body: JSON.stringify({ title: '测试临时章', parent_id: ch.id }), token });
-check('TC-86 新建章节(作为子节)', ch4.status === 200 && ch4.data.id > 0);
-let ch5 = await req('/api/chapters/' + ch.id, { method: 'DELETE', token });
-check('TC-87 删除章节(含子节)', ch5.status === 200);
-let ch6 = await req('/api/chapters/' + ch.id, { token });
-check('TC-88 删除后读取404', ch6.status === 404);
-// 写入第2章内容，供导出与进度统计复用
-const chB = ol1.data.chapters[1];
-const moreContent = '本章为文献综述。利益相关者理论是核心理论基础。';
-await req('/api/chapters/' + chB.id, { method: 'PUT', body: JSON.stringify({ content: moreContent }), token });
-let ex1 = await req('/api/thesis/export?fmt=docx', { token });
-const exMagic = ex1.status === 200 && ex1.data[0] === 0x50 && ex1.data[1] === 0x4b;
-let ex2 = await req('/api/thesis/export?fmt=docx', { token });
-check('TC-89 全文导出docx(合法zip魔数)', exMagic);
-// L-7 确定性：两次导出 document.xml 完全一致
-let det = false;
-if (exMagic && ex2.status === 200) {
-  try {
-    const { createRequire } = await import('node:module');
-    const require2 = createRequire(import.meta.url);
-    const AdmZip2 = require2('adm-zip');
-    const xmlA = new AdmZip2(Buffer.from(ex1.data)).getEntry('word/document.xml').getData().toString('utf8');
-    const xmlB = new AdmZip2(Buffer.from(ex2.data)).getEntry('word/document.xml').getData().toString('utf8');
-    det = xmlA === xmlB && xmlA.includes('Heading1') && xmlA.includes('利益相关者理论');
-  } catch {}
+// v0.4：论文数据不在服务端——原 v0.3 存储端点全部移除
+for (const [name, path2, opt] of [
+  ['thesis', '/api/thesis', { method: 'GET' }],
+  ['chapters', '/api/chapters/1', { method: 'GET' }],
+  ['outline树', '/api/outline', { method: 'GET' }],
+  ['progress', '/api/progress', { method: 'GET' }],
+  ['checkins', '/api/checkins', { method: 'GET' }],
+  ['thesis导出', '/api/thesis/export?fmt=docx', { method: 'GET' }],
+]) {
+  const rr = await req(path2, { ...opt, token });
+  check(`TC-76 服务端已移除论文存储端点(${name}→404)`, rr.status === 404, `${name} status=${rr.status}`);
 }
-check('TC-90 导出确定性(两次document.xml一致且含标题层级)', det);
-let ex3 = await req('/api/thesis/export?fmt=txt', { token });
-check('TC-91 全文导出txt(含标题与正文)', ex3.status === 200 && ex3.data.includes('新标题测试') && ex3.data.includes('利益相关者理论'));
+// 测试库中不存在论文相关表（sqlite_master 断言）
+const { DatabaseSync } = await import('node:sqlite');
+const tdb = new DatabaseSync(DB);
+const tables = tdb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((x) => x.name);
+check('TC-77 测试库无论文数据表', !['theses', 'chapters', 'checkins', 'topic_sessions', 'topic_messages'].some((t) => tables.includes(t)), tables.join(','));
+check('TC-78 测试库仅存账号/会话/密钥/记录表', ['users', 'sessions', 'api_keys', 'records'].every((t) => tables.includes(t)));
 
-// ===== 用例组15：M12 写作进度与打卡 =====
-console.log('[测试] 组15 M12进度打卡…');
-let pg1 = await req('/api/progress', { token });
-const contentWords = pg1.data.chapters.reduce((a, b) => a + b.words, 0);
-const expectPct = Math.round((pg1.data.total_words / 30000) * 1000) / 10;
-check('TC-92 进度统计(总字数=各章之和,确定性)', pg1.status === 200 && pg1.data.total_words === contentWords && pg1.data.total_words > 0 && pg1.data.percent === expectPct && pg1.data.percent > 0 && pg1.data.rule.includes('确定性'), `total=${pg1.data.total_words} pct=${pg1.data.percent} expect=${expectPct}`);
-let ck1 = await req('/api/checkins', { method: 'POST', body: JSON.stringify({ note: '写了引言' }), token });
-check('TC-93 打卡成功(增量=当前总字数)', ck1.status === 200 && ck1.data.word_delta === pg1.data.total_words && ck1.data.total_words === pg1.data.total_words);
-// 再写一章再打卡：增量应为新增字数
-const chC = ol1.data.chapters[2];
-await req('/api/chapters/' + chC.id, { method: 'PUT', body: JSON.stringify({ content: '本章介绍研究方法与案例选择。' }), token });
-let pg2 = await req('/api/progress', { token });
-let ck2 = await req('/api/checkins', { method: 'POST', body: JSON.stringify({ note: '补文献' }), token });
-check('TC-94 二次打卡增量=新增字数', ck2.status === 200 && ck2.data.word_delta === pg2.data.total_words - pg1.data.total_words && ck2.data.word_delta > 0, JSON.stringify(ck2.data));
-let ck3 = await req('/api/checkins', { token });
-check('TC-95 打卡列表与连续天数(≥1天)', ck3.status === 200 && ck3.data.checkins.length === 1 && ck3.data.streak >= 1, JSON.stringify(ck3.data));
+// ===== 用例组14：本地核心库单测（dingao-local.js，node 侧执行同一份代码） =====
+console.log('[测试] 组14 本地核心库单测…');
+await import(new URL('../public/dingao-local.js', import.meta.url).href);
+const L = globalThis.DingaoLocal;
+check('TC-79 本地库加载成功', !!L && typeof L.wordCount === 'function');
+check('TC-80 字数统计确定性(中文按字/英文按词)', L.wordCount('测试内容abc123') === 5 && L.wordCount('') === 0 && L.wordCount('研究背景测试内容。') === 9);
+const stdChs = L.standardChapters().map((c, i) => ({ ...c, id: i + 1 }));
+check('TC-81 标准章节结构(5章)', stdChs.length === 5 && stdChs[0].title === '第1章 绪论' && stdChs[4].title === '第5章 结论与展望');
+const tree = L.buildTree(stdChs.map((c) => ({ ...c })));
+check('TC-82 树构建与扁平化往返无损', JSON.stringify(L.flattenTree(tree).map((c) => ({ id: c.id, parent_id: c.parent_id, title: c.title, content: c.content, status: c.status, sort: c.sort }))) === JSON.stringify(stdChs));
+tree[0].content = '本章为绪论。研究背景测试。';
+tree[0].children.push({ id: 6, parent_id: 1, title: '1.1 研究背景', content: '背景内容测试。', status: 'todo', sort: 0, children: [] });
+const prog = L.computeProgress(tree, 30000);
+const expectWords = L.wordCount('本章为绪论。研究背景测试。') + L.wordCount('背景内容测试。');
+check('TC-83 进度统计(总字数=各章之和+百分位公式)', prog.total_words === expectWords && prog.percent === Math.round((expectWords / 30000) * 1000) / 10 && prog.chapter_count === 6);
+const ck1 = L.addCheckin([], prog.total_words, '第一次打卡');
+const ck2 = L.addCheckin(ck1.checkins, prog.total_words + 100, '同日再打');
+check('TC-84 打卡增量与同日upsert', ck1.checkin.word_delta === prog.total_words && ck2.checkins.length === 1 && ck2.checkin.word_delta === 100);
+check('TC-85 连续天数计算(今日打卡≥1)', L.calcStreak(ck2.checkins) >= 1);
+check('TC-86 文本导出(标题与正文)', L.thesisToTxt('测试论文', tree).includes('# 第1章 绪论') && L.thesisToTxt('测试论文', tree).includes('研究背景测试') && L.outlineToTxt('测试论文', tree).includes('1.1 研究背景'));
+check('TC-87 树操作(查找节点/父节点)', L.findNode(tree, 6).title === '1.1 研究背景' && L.findParent(tree, 6, null).id === 1);
 
-// ===== 用例组16：隐私隔离（L-4 未授权不可查阅） =====
-console.log('[测试] 组16 隐私隔离…');
-const otherThesis = await req('/api/thesis', { token: r2l.data.token });
-check('TC-96 用户B拥有独立论文', otherThesis.status === 200 && otherThesis.data.id > 0);
-let iso1 = await req('/api/chapters/' + chB.id, { token: r2l.data.token });
-check('TC-97 用户B读取A的章节404', iso1.status === 404);
-let iso2 = await req('/api/chapters/' + chB.id, { method: 'PUT', body: JSON.stringify({ content: '越权修改' }), token: r2l.data.token });
-check('TC-98 用户B修改A的章节404', iso2.status === 404);
-let iso3 = await req('/api/chapters/' + chB.id, { method: 'DELETE', token: r2l.data.token });
-check('TC-99 用户B删除A的章节404', iso3.status === 404);
-// 管理员（首个注册用户）同样无法查看他人论文内容（L-4：管理员权限不含内容查看）
-const isoNew = await req('/api/chapters', { method: 'POST', body: JSON.stringify({ title: 'B的秘密章节' }), token: r2l.data.token });
-const bChId = isoNew.data?.id;
-if (bChId) {
-  const bChOwn = await req('/api/chapters/' + bChId, { token: r2l.data.token });
-  const adminRead = await req('/api/chapters/' + bChId, { token });
-  check('TC-100 管理员读取他人章节404(无内容查看权)', bChOwn.status === 200 && adminRead.status === 404);
-} else {
-  check('TC-100 管理员读取他人章节404(无内容查看权)', false, JSON.stringify(isoNew.data));
-}
-let iso5 = await req('/api/checkins', { token: r2l.data.token });
-check('TC-101 打卡记录用户间隔离', iso5.status === 200 && iso5.data.checkins.length === 0);
-let iso6 = await req('/api/thesis', { token: r2l.data.token });
-check('TC-102 B的论文标题与A互不影响', iso6.status === 200 && iso6.data.title !== '新标题测试');
+// ===== 用例组15：浏览器端 Word 导出（docx IIFE 构建·确定性） =====
+console.log('[测试] 组15 浏览器端docx导出…');
+const { createRequire } = await import('node:module');
+globalThis.docx = createRequire(import.meta.url)('docx');
+const doc1 = L.buildThesisDocx('测试论文', tree);
+const buf1 = Buffer.from(await globalThis.docx.Packer.toBuffer(doc1));
+const doc2 = L.buildThesisDocx('测试论文', tree);
+const buf2 = Buffer.from(await globalThis.docx.Packer.toBuffer(doc2));
+check('TC-88 docx导出合法zip魔数', buf1[0] === 0x50 && buf1[1] === 0x4b);
+const AdmZip3 = createRequire(import.meta.url)('adm-zip');
+const xmlA = new AdmZip3(buf1).getEntry('word/document.xml').getData().toString('utf8');
+const xmlB = new AdmZip3(buf2).getEntry('word/document.xml').getData().toString('utf8');
+check('TC-89 docx含标题层级与正文', xmlA.includes('Heading1') && xmlA.includes('研究背景测试'));
+check('TC-90 导出确定性(两次document.xml一致)', xmlA === xmlB);
+const docO = L.buildOutlineDocx('测试论文', tree);
+const bufO = Buffer.from(await globalThis.docx.Packer.toBuffer(docO));
+check('TC-91 大纲docx导出合法(zip魔数)', bufO[0] === 0x50 && bufO[1] === 0x4b);
+
+// ===== 用例组16：前端完整性（v0.4 本地优先） =====
+console.log('[测试] 组16 前端完整性（v0.4 本地优先）…');
+const localjs = fs.readFileSync(path.join(__dirname, '..', 'public', 'dingao-local.js'), 'utf8');
+check('TC-92 前端引入本地库与docx浏览器构建', idx.includes('vendor/docx.iife.js') && idx.includes('dingao-local.js'));
+check('TC-93 本地库按账号分库(IndexedDB)', localjs.includes('dingao_v04_') && localjs.includes('indexedDB.open'));
+check('TC-94 前端不再调用服务端论文存储端点', !appjs.includes('/api/chapters/') && !appjs.includes('/api/thesis/export') && !appjs.includes('/api/outline/export') && !appjs.includes('/api/checkins') && !appjs.includes('/api/progress'));
+check('TC-95 写作自动保存为本地写库', appjs.includes('saveChapter') && appjs.includes('saveChapters(api.userId'));
+check('TC-96 选题追问走纯中转iterate', appjs.includes('/api/topics/iterate') && !appjs.includes('/api/topics/sessions/'));
+check('TC-97 前端无内嵌密钥与明文Key', !/sk-[A-Za-z0-9]{16,}/.test(appjs) && !/sk-[A-Za-z0-9]{16,}/.test(idx) && !/sk-[A-Za-z0-9]{16,}/.test(localjs));
 
 server.kill();
 console.log('\n========== 测试结果 ==========');

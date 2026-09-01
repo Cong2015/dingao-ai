@@ -595,17 +595,18 @@ async function authSubmit() {
   } catch (e) { setAuth(false, e.message); }
 }
 async function refreshUser() {
-  if (!api.token) { $('#userName').classList.add('hidden'); $('#keyBtn').classList.add('hidden'); $('#loginBtn').classList.remove('hidden'); $('#logoutBtn').classList.add('hidden'); return; }
+  if (!api.token) { api.userId = null; $('#userName').classList.add('hidden'); $('#keyBtn').classList.add('hidden'); $('#loginBtn').classList.remove('hidden'); $('#logoutBtn').classList.add('hidden'); return; }
   try {
     const u = await api.req('/api/auth/me');
+    api.userId = u.id;
     $('#userName').textContent = u.username + (u.isAdmin ? '（管理员）' : '');
     $('#userName').classList.remove('hidden');
     $('#loginBtn').classList.add('hidden'); $('#logoutBtn').classList.remove('hidden');
     $('#keyBtn').classList.remove('hidden');
     if (u.keyMasked) $('#keyBtn').textContent = '🔑 ' + u.keyMasked;
-  } catch { api.token = ''; localStorage.removeItem('dg_token'); }
+  } catch { api.token = ''; api.userId = null; localStorage.removeItem('dg_token'); }
 }
-async function logout() { await api.req('/api/auth/logout', { method: 'POST' }).catch(() => {}); api.token = ''; localStorage.removeItem('dg_token'); refreshUser(); loadRecords(); }
+async function logout() { await api.req('/api/auth/logout', { method: 'POST' }).catch(() => {}); api.token = ''; api.userId = null; localStorage.removeItem('dg_token'); refreshUser(); loadRecords(); }
 async function loadKeyStatus() {
   try {
     const k = await api.req('/api/apikey');
@@ -665,57 +666,77 @@ window.delRecord = async (id) => {
 };
 
 // ============================================================
-// 写作四视图（V1.3 新增）：M9 选题 / M10 大纲 / M11 编写 / M12 进度
+// 写作四视图（V1.4 本地优先）：M9 选题 / M10 大纲 / M11 编写 / M12 进度
+// 论文数据全部存本浏览器 IndexedDB（按账号分库），服务器不保存任何论文内容
 // ============================================================
-let topicSessionId = Number(localStorage.getItem('dg_topic_sid')) || null;
-let topicTopics = [];
+let topicLocal = null;                 // {topics, history:[{role,content}], form} 本地会话
 let generatedOutline = null;
 const writingState = { tree: [], currentId: null, dirty: false, saveTimer: null };
 let outlineTree = [];
+let outlineFlat = [];
 
 // ---------- 通用小工具 ----------
-function writeGuard() { if (!api.token) { showModal('login'); return false; } return true; }
-function findNode(list, id) { for (const c of list) { if (c.id === id) return c; const r = findNode(c.children || [], id); if (r) return r; } return null; }
-function findParent(list, id, parent) { for (const c of list) { if (c.id === id) return parent; const r = findParent(c.children || [], id, c); if (r) return r; } return null; }
+function writeGuard() { if (!api.token || !api.userId) { showModal('login'); return false; } return true; }
+const L = () => DingaoLocal;
+const findNode = (list, id) => DingaoLocal.findNode(list, id);
+const findParent = (list, id, parent) => DingaoLocal.findParent(list, id, parent);
+async function newChapterId() {
+  const t = await L().getThesis(api.userId);
+  t.seq = (Number(t.seq) || 0) + 1;
+  await L().saveThesis(api.userId, t);
+  return t.seq;
+}
+function downloadText(name, text) {
+  const blob = new Blob(['﻿' + text], { type: 'text/plain;charset=utf-8' });
+  downloadBlob(name, blob);
+}
+function downloadBlob(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+async function loadLocalThesis() {
+  const t = await L().getThesis(api.userId);
+  outlineFlat = await L().getChapters(api.userId);
+  outlineTree = DingaoLocal.buildTree(outlineFlat);
+  return t;
+}
 
-// ---------- M9 选题助手 ----------
+// ---------- M9 选题助手（会话存本浏览器） ----------
 async function renderTopic() {
   $('#tpList').innerHTML = '';
   $('#tpAskWrap').classList.add('hidden');
   $('#tpHistory').innerHTML = '';
-  $('#tpStatus').textContent = '选题仅基于你提供的信息推断，由AI生成、需人工核验；采纳后自动生成标准章节结构。';
-  if (!api.token || !topicSessionId) return;
-  try {
-    const rows = await api.req('/api/topics/sessions');
-    const s = rows.find((r) => r.id === topicSessionId);
-    if (s) {
-      topicTopics = s.topics;
-      renderTopicCards(s.topics);
-      $('#tpAskWrap').classList.remove('hidden');
-      $('#tpStatus').textContent = `已恢复上次会话 #${s.id}（${s.topics.length} 个选题）· 由AI生成，需人工核验`;
-    }
-  } catch {}
+  $('#tpStatus').textContent = '选题仅基于你提供的信息推断，由AI生成、需人工核验；采纳后自动生成标准章节结构。会话与论文数据仅存本浏览器。';
+  if (!api.token || !api.userId) return;
+  topicLocal = (await L().getTopicSession(api.userId)) || null;
+  if (topicLocal && Array.isArray(topicLocal.topics) && topicLocal.topics.length) {
+    renderTopicCards(topicLocal.topics);
+    $('#tpAskWrap').classList.remove('hidden');
+    $('#tpHistory').innerHTML = (topicLocal.history || []).slice(2)
+      .map((m) => `<div class="tp-msg ${m.role === 'user' ? 'me' : 'ai'}">${m.role === 'user' ? '我' : 'AI'}：${esc(String(m.content).slice(0, 120))}</div>`).join('');
+    $('#tpStatus').textContent = `已恢复上次选题会话（${topicLocal.topics.length} 个选题）· 由AI生成，需人工核验`;
+  }
 }
 $('#tpGenBtn').addEventListener('click', async () => {
   const problem = $('#tpProblem').value.trim();
   if (!problem) { $('#tpStatus').textContent = '⚠️ 请填写实际工程问题'; return; }
-  if (!api.token) { showModal('login'); return; }
-  $('#tpStatus').textContent = 'AI 思考中（约 20-60 秒）…';
+  if (!writeGuard()) return;
+  $('#tpStatus').textContent = 'AI 思考中（约 20-60 秒，输入仅内存中转、服务端不存储）…';
   $('#tpGenBtn').disabled = true;
   try {
-    const d = await api.req('/api/topics/suggest', {
-      method: 'POST',
-      body: JSON.stringify({ form: {
-        problem,
-        literatures: $('#tpLits').value.split(/\n\s*\n/).filter(Boolean),
-        discipline: $('#tpDiscipline').value.trim(),
-        interests: $('#tpInterests').value.trim(),
-        count: Number($('#tpCount').value),
-      } }),
-    });
-    topicSessionId = d.session_id;
-    localStorage.setItem('dg_topic_sid', String(d.session_id));
-    topicTopics = d.topics;
+    const form = {
+      problem,
+      literatures: $('#tpLits').value.split(/\n\s*\n/).filter(Boolean),
+      discipline: $('#tpDiscipline').value.trim(),
+      interests: $('#tpInterests').value.trim(),
+      count: Number($('#tpCount').value),
+    };
+    const d = await api.req('/api/topics/suggest', { method: 'POST', body: JSON.stringify({ form }) });
+    topicLocal = { topics: d.topics, history: [{ role: 'user', content: problem }, { role: 'assistant', content: '已生成 ' + d.topics.length + ' 个选题' }], form };
+    await L().saveTopicSession(api.userId, topicLocal);
     renderTopicCards(d.topics);
     $('#tpAskWrap').classList.remove('hidden');
     $('#tpStatus').textContent = `✅ 已生成 ${d.topics.length} 个选题（${d.model}）· 由AI生成，需人工核验`;
@@ -735,29 +756,40 @@ function renderTopicCards(topics) {
     </div>`).join('');
   document.querySelectorAll('#tpList [data-adopt]').forEach((b) => b.addEventListener('click', () => adoptTopic(b.dataset.adopt)));
   document.querySelectorAll('#tpList [data-ask]').forEach((b) => b.addEventListener('click', () => {
-    const t = topicTopics.find((x) => String(x.index) === b.dataset.ask);
+    const t = (topicLocal && topicLocal.topics || []).find((x) => String(x.index) === b.dataset.ask);
     $('#tpAsk').value = `关于「${t ? t.title : ''}」，我想了解：`;
     $('#tpAsk').focus();
   }));
 }
 async function adoptTopic(index) {
-  if (!topicSessionId) { alert('请先生成选题'); return; }
-  if (!confirm('采纳该选题？论文标题将设为该选题，并生成标准章节结构（当前章节内容将被替换）')) return;
+  if (!topicLocal || !topicLocal.topics.length) { alert('请先生成选题'); return; }
+  const topic = topicLocal.topics.find((t) => String(t.index) === String(index));
+  if (!topic) { alert('选题不存在，请重新生成'); return; }
+  if (!confirm('采纳该选题？论文标题将设为该选题，并生成标准章节结构（当前本地章节将被替换）')) return;
   try {
-    const d = await api.req('/api/topics/adopt', { method: 'POST', body: JSON.stringify({ session_id: topicSessionId, topic_index: Number(index) }) });
-    alert(`✅ ${d.message}，共 ${d.chapter_count} 个章节。可在「大纲」与「本地编写」中继续。`);
+    const t = await L().getThesis(api.userId);
+    t.title = String(topic.title).slice(0, 100);
+    t.topic = t.title;
+    await L().saveThesis(api.userId, t);
+    const chapters = DingaoLocal.standardChapters();
+    for (const c of chapters) c.id = await newChapterId();
+    await L().saveChapters(api.userId, chapters);
+    alert(`✅ 已采纳选题，并生成 ${chapters.length} 个标准章节（仅存本浏览器）。可在「大纲」与「本地编写」中继续。`);
     switchFn('outline');
   } catch (e) { alert(e.message); }
 }
 async function topicAsk() {
   const q = $('#tpAsk').value.trim();
   if (!q) return;
-  if (!topicSessionId) { alert('请先生成选题'); return; }
+  if (!topicLocal) { alert('请先生成选题'); return; }
   try {
     $('#tpAskBtn').disabled = true;
     $('#tpAskBtn').textContent = '思考中…';
-    const d = await api.req(`/api/topics/sessions/${topicSessionId}/messages`, { method: 'POST', body: JSON.stringify({ content: q }) });
-    topicTopics = d.topics;
+    const history = (topicLocal.history || []).concat([{ role: 'user', content: q }]);
+    const d = await api.req('/api/topics/iterate', { method: 'POST', body: JSON.stringify({ history, question: q }) });
+    topicLocal.topics = d.topics;
+    topicLocal.history = history.concat([{ role: 'assistant', content: '已更新 ' + d.topics.length + ' 个选题建议' }]);
+    await L().saveTopicSession(api.userId, topicLocal);
     renderTopicCards(d.topics);
     $('#tpHistory').insertAdjacentHTML('beforeend',
       `<div class="tp-msg me">我：${esc(q)}</div><div class="tp-msg ai">AI：已更新 ${d.topics.length} 个选题建议（${d.model}）</div>`);
@@ -769,15 +801,13 @@ async function topicAsk() {
 $('#tpAskBtn').addEventListener('click', topicAsk);
 $('#tpAsk').addEventListener('keydown', (e) => { if (e.key === 'Enter') topicAsk(); });
 
-// ---------- M10 大纲 ----------
-let outlineTempSeq = 0;
+// ---------- M10 大纲（树存本浏览器，AI生成走纯中转） ----------
 async function renderOutline() {
   if (!writeGuard()) return;
   try {
-    const d = await api.req('/api/outline');
-    outlineTree = d.chapters;
-    $('#olThesisTitle').textContent = `论文：${d.title}`;
-    $('#olGenTitle').value = (d.topic && d.topic !== d.title) ? d.topic : (d.title !== '我的论文' ? d.title : '');
+    const t = await loadLocalThesis();
+    $('#olThesisTitle').textContent = `论文：${t.title}`;
+    $('#olGenTitle').value = (t.topic && t.topic !== t.title) ? t.topic : (t.title !== '我的论文' ? t.title : '');
     $('#olApplyGen').classList.add('hidden');
     renderOlTree();
   } catch (e) { $('#olStatus').textContent = '❌ ' + e.message; }
@@ -825,7 +855,7 @@ async function olOp(op, id) {
     const title = prompt('新子节标题：');
     if (!title) return;
     node.children = node.children || [];
-    node.children.push({ id: --outlineTempSeq, parent_id: node.id, title: title.trim().slice(0, 100), content: '', status: 'todo', children: [] });
+    node.children.push({ id: await newChapterId(), parent_id: node.id, title: title.trim().slice(0, 100), content: '', status: 'todo', children: [] });
     await saveOutline();
   } else if (op === 'del') {
     if (!confirm(`删除「${node.title}」及其所有子节？`)) return;
@@ -850,67 +880,80 @@ async function olOp(op, id) {
 }
 async function saveOutline() {
   try {
-    const d = await api.req('/api/outline', { method: 'PUT', body: JSON.stringify({ chapters: outlineTree }) });
-    outlineTree = d.chapters;
+    outlineFlat = DingaoLocal.flattenTree(outlineTree);
+    let s = 0;
+    for (const c of outlineFlat) c.sort = s++;
+    await L().saveChapters(api.userId, outlineFlat);
     renderOlTree();
-    $('#olSaveState').textContent = '✅ 已保存 ' + new Date().toLocaleTimeString();
+    $('#olSaveState').textContent = '✅ 已保存到本浏览器 ' + new Date().toLocaleTimeString();
   } catch (e) { $('#olSaveState').textContent = '⚠️ ' + e.message; }
 }
 $('#olAddCh').addEventListener('click', async () => {
   const title = prompt('新章标题：');
   if (!title) return;
-  outlineTree.push({ id: --outlineTempSeq, parent_id: 0, title: title.trim().slice(0, 100), content: '', status: 'todo', children: [] });
+  outlineTree.push({ id: await newChapterId(), parent_id: 0, title: title.trim().slice(0, 100), content: '', status: 'todo', children: [] });
   await saveOutline();
 });
 $('#olGenBtn').addEventListener('click', async () => {
   const title = $('#olGenTitle').value.trim();
   if (!title) { $('#olStatus').textContent = '⚠️ 请填写选题/论文标题'; return; }
-  if (!api.token) { showModal('login'); return; }
-  $('#olStatus').textContent = 'AI 生成中（约 20-60 秒）…';
+  if (!writeGuard()) return;
+  $('#olStatus').textContent = 'AI 生成中（约 20-60 秒，输入仅内存中转、服务端不存储）…';
   $('#olGenBtn').disabled = true;
   try {
     const d = await api.req('/api/outline/generate', { method: 'POST', body: JSON.stringify({ title, extra: $('#olGenExtra').value.trim() }) });
     generatedOutline = d.chapters;
     $('#olApplyGen').classList.remove('hidden');
-    $('#olStatus').textContent = `✅ 已生成 ${d.chapters.length} 章大纲（${d.model}）· 点击「应用生成的大纲」写入（将替换当前大纲），或复制后手动编辑`;
+    $('#olStatus').textContent = `✅ 已生成 ${d.chapters.length} 章大纲（${d.model}）· 点击「应用生成的大纲」写入本浏览器（将替换当前大纲）`;
   } catch (e) { $('#olStatus').textContent = '❌ ' + e.message; }
   finally { $('#olGenBtn').disabled = false; }
 });
 $('#olApplyGen').addEventListener('click', async () => {
   if (!generatedOutline) return;
-  if (!confirm('应用生成的大纲？将替换当前大纲（章节正文将被清空重建）')) return;
-  outlineTree = generatedOutline.map((ch) => ({
-    id: --outlineTempSeq, parent_id: 0, title: String(ch.title || '').slice(0, 100), content: '', status: 'todo',
-    children: (Array.isArray(ch.sections) ? ch.sections : []).map((s) => ({ id: --outlineTempSeq, parent_id: -1, title: String(s).slice(0, 100), content: '', status: 'todo', children: [] })),
-  }));
-  await saveOutline();
-  $('#olApplyGen').classList.add('hidden');
-  generatedOutline = null;
-  $('#olStatus').textContent = '✅ 大纲已应用，可双击标题继续编辑';
+  if (!confirm('应用生成的大纲？将替换当前大纲（本浏览器中的章节正文将被清空重建）')) return;
+  try {
+    const flat = [];
+    for (const ch of generatedOutline) {
+      const cid = await newChapterId();
+      flat.push({ id: cid, parent_id: 0, title: String(ch.title || '').slice(0, 100), content: '', status: 'todo', sort: 0 });
+      for (const s of (Array.isArray(ch.sections) ? ch.sections : [])) {
+        flat.push({ id: await newChapterId(), parent_id: cid, title: String(s).slice(0, 100), content: '', status: 'todo', sort: 0 });
+      }
+    }
+    let s = 0;
+    for (const c of flat) c.sort = s++;
+    await L().saveChapters(api.userId, flat);
+    outlineFlat = flat;
+    outlineTree = DingaoLocal.buildTree(flat);
+    renderOlTree();
+    $('#olApplyGen').classList.add('hidden');
+    generatedOutline = null;
+    $('#olStatus').textContent = '✅ 大纲已应用（仅存本浏览器），可双击标题继续编辑';
+  } catch (e) { alert(e.message); }
 });
 async function olExport(fmt) {
   try {
-    const r = await fetch(`/api/outline/export?fmt=${fmt}`, { headers: { Authorization: `Bearer ${api.token}` } });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || '导出失败');
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = '大纲.' + fmt;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const title = $('#olThesisTitle').textContent.replace('论文：', '');
+    if (fmt === 'txt') {
+      downloadText(title + '-大纲.txt', DingaoLocal.outlineToTxt(title, outlineTree));
+    } else {
+      const doc = DingaoLocal.buildOutlineDocx(title, outlineTree);
+      const blob = await DingaoLocal.docxToBlob(doc);
+      downloadBlob(title + '-大纲.docx', blob);
+    }
   } catch (e) { alert(e.message); }
 }
 $('#olExportTxt').addEventListener('click', () => olExport('txt'));
 $('#olExportDocx').addEventListener('click', () => olExport('docx'));
 
-// ---------- M11 本地编写（自动保存 + Word备份 + 隔离提示） ----------
+// ---------- M11 本地编写（自动保存到本浏览器 IndexedDB + Word备份） ----------
 async function renderWriting() {
   if (!writeGuard()) return;
   try {
-    const d = await api.req('/api/outline');
-    writingState.tree = d.chapters;
+    await loadLocalThesis();
+    writingState.tree = outlineTree;
     renderChList();
-    if (!writingState.currentId) {
+    if (!writingState.currentId || !findNode(writingState.tree, writingState.currentId)) {
       const first = writingState.tree[0];
       if (first) selectChapter(first.id);
     }
@@ -935,28 +978,28 @@ function renderChList() {
 async function selectChapter(id) {
   await flushSave();
   writingState.currentId = id;
-  try {
-    const c = await api.req('/api/chapters/' + id);
-    $('#chTitle').textContent = c.title;
-    $('#chEditor').value = c.content || '';
-    $('#chStatus').value = c.status;
-    $('#chCharCount').textContent = (c.content || '').length + ' 字';
-    $('#chSaveState').textContent = '已载入';
-    writingState.dirty = false;
-    renderChList();
-  } catch (e) { $('#chSaveState').textContent = '❌ ' + e.message; }
+  const c = findNode(writingState.tree, id);
+  if (!c) { $('#chSaveState').textContent = '⚠️ 章节不存在'; return; }
+  $('#chTitle').textContent = c.title;
+  $('#chEditor').value = c.content || '';
+  $('#chStatus').value = c.status;
+  $('#chCharCount').textContent = (c.content || '').length + ' 字';
+  $('#chSaveState').textContent = '已载入（本浏览器本地）';
+  writingState.dirty = false;
+  renderChList();
 }
 async function flushSave() { if (writingState.dirty) await saveChapter(); }
 async function saveChapter() {
   clearTimeout(writingState.saveTimer);
   if (!writingState.dirty || !writingState.currentId) return;
   try {
-    const d = await api.req('/api/chapters/' + writingState.currentId, {
-      method: 'PUT',
-      body: JSON.stringify({ content: $('#chEditor').value, status: $('#chStatus').value }),
-    });
+    const c = findNode(writingState.tree, writingState.currentId);
+    if (!c) return;
+    c.content = $('#chEditor').value;
+    c.status = $('#chStatus').value;
+    await L().saveChapter(api.userId, { id: c.id, parent_id: c.parent_id, title: c.title, content: c.content, status: c.status, sort: c.sort });
     writingState.dirty = false;
-    $('#chSaveState').textContent = `✅ 已保存 ${new Date().toLocaleTimeString()}（${d.words} 字）`;
+    $('#chSaveState').textContent = `✅ 已保存到本浏览器 ${new Date().toLocaleTimeString()}（${DingaoLocal.wordCount(c.content)} 字）`;
   } catch (e) { $('#chSaveState').textContent = '⚠️ 保存失败：' + e.message; }
 }
 $('#chEditor').addEventListener('input', () => {
@@ -964,7 +1007,7 @@ $('#chEditor').addEventListener('input', () => {
   writingState.dirty = true;
   $('#chSaveState').textContent = '编辑中…';
   clearTimeout(writingState.saveTimer);
-  writingState.saveTimer = setTimeout(saveChapter, 900);   // 自动保存（防抖）
+  writingState.saveTimer = setTimeout(saveChapter, 900);   // 自动保存（防抖，写入本浏览器 IndexedDB）
 });
 $('#chEditor').addEventListener('blur', saveChapter);
 $('#chStatus').addEventListener('change', () => { writingState.dirty = true; saveChapter(); });
@@ -972,39 +1015,28 @@ $('#chAdd').addEventListener('click', async () => {
   const title = prompt('新章节标题：');
   if (!title) return;
   try {
-    await api.req('/api/chapters', { method: 'POST', body: JSON.stringify({ title }) });
-    const d = await api.req('/api/outline');
-    writingState.tree = d.chapters;
+    const c = { id: await newChapterId(), parent_id: 0, title: title.trim().slice(0, 100), content: '', status: 'todo', sort: 9999 };
+    outlineFlat.push(c);
+    await L().saveChapters(api.userId, outlineFlat);
+    writingState.tree = DingaoLocal.buildTree(outlineFlat);
     renderChList();
   } catch (e) { alert(e.message); }
 });
-// 页面切后台时尽力保存（keepalive；超大内容跳过，防抖保存兜底）
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'hidden' || !writingState.dirty || !writingState.currentId) return;
-  const body = JSON.stringify({ content: $('#chEditor').value, status: $('#chStatus').value });
-  if (body.length > 60000) return;
-  fetch(`/api/chapters/${writingState.currentId}`, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${api.token}`, 'Content-Type': 'application/json' },
-    body, keepalive: true,
-  }).catch(() => {});
-});
 async function thesisExport(fmt) {
-  if (!api.token) { showModal('login'); return; }
+  if (!writeGuard()) return;
   try {
     await flushSave();
-    const r = await fetch(`/api/thesis/export?fmt=${fmt}`, { headers: { Authorization: `Bearer ${api.token}` } });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || '导出失败');
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    const cd = (r.headers.get('content-disposition') || '').match(/filename\*=UTF-8''([^;]+)/);
-    a.href = URL.createObjectURL(blob);
-    a.download = cd ? decodeURIComponent(cd[1]) : '论文.' + fmt;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const t = await L().getThesis(api.userId);
+    if (fmt === 'txt') {
+      downloadText(t.title + '.txt', DingaoLocal.thesisToTxt(t.title, writingState.tree));
+    } else {
+      const doc = DingaoLocal.buildThesisDocx(t.title, writingState.tree);
+      const blob = await DingaoLocal.docxToBlob(doc);
+      downloadBlob(t.title + '.docx', blob);
+    }
     localStorage.setItem('dg_last_export', String(Date.now()));
     updateBackupWarn();
-    $('#chSaveState').textContent = `✅ 已导出 ${fmt.toUpperCase()} 备份（${new Date().toLocaleTimeString()}）`;
+    $('#chSaveState').textContent = `✅ 已导出 ${fmt.toUpperCase()} 备份（本机生成，未经过服务器）`;
   } catch (e) { alert(e.message); }
 }
 function updateBackupWarn() {
@@ -1014,39 +1046,50 @@ function updateBackupWarn() {
 $('#chExportDocx').addEventListener('click', () => thesisExport('docx'));
 $('#chExportTxt').addEventListener('click', () => thesisExport('txt'));
 
-// ---------- M12 进度打卡 ----------
+// ---------- M12 进度打卡（本地统计·零AI成本·零上传） ----------
 async function renderProgress() {
   if (!writeGuard()) return;
   try {
-    const p = await api.req('/api/progress');
-    const c = await api.req('/api/checkins');
-    $('#pgThesis').textContent = `《${p.title}》`;
+    const t = await L().getThesis(api.userId);
+    const flat = await L().getChapters(api.userId);
+    const p = DingaoLocal.computeProgress(DingaoLocal.buildTree(flat), t.target_words);
+    const ck = await L().getCheckins(api.userId);
+    const streak = DingaoLocal.calcStreak(ck);
+    $('#pgThesis').textContent = `《${t.title}》`;
     $('#pgBar').style.width = p.percent + '%';
     $('#pgStats').innerHTML = `
       <span class="stat-chip">总字数 <b>${p.total_words}</b></span>
       <span class="stat-chip">目标 <b>${p.target_words}</b></span>
       <span class="stat-chip">完成度 <b>${p.percent}%</b></span>
-      <span class="stat-chip">章节 <b>${p.chapter_count}</b></span>`;
-    $('#pgTarget').value = p.target_words;
+      <span class="stat-chip">章节 <b>${p.chapter_count}</b></span>
+      <span class="stat-chip">🔒 本地统计·不上传</span>`;
+    $('#pgTarget').value = t.target_words;
     const stTxt = { todo: '未开始', writing: '写作中', done: '已完成' };
     $('#pgChapterTable').innerHTML = '<tr><th>章节</th><th>字数</th><th>状态</th></tr>' +
       p.chapters.map((x) => `<tr><td style="padding-left:${x.parent_id ? 26 : 10}px">${esc(x.title)}</td><td>${x.words}</td><td>${stTxt[x.status] || x.status}</td></tr>`).join('');
-    $('#pgStreak').textContent = `🔥 连续打卡 ${c.streak} 天`;
+    $('#pgStreak').textContent = `🔥 连续打卡 ${streak} 天`;
     $('#pgCheckinTable').innerHTML = '<tr><th>日期</th><th>当日字数</th><th>累计字数</th><th>备注</th></tr>' +
-      (c.checkins.length ? c.checkins.map((x) => `<tr><td>${esc(x.date)}</td><td>+${x.word_delta}</td><td>${x.total_words}</td><td>${esc(x.note || '')}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">还没有打卡记录，写下第一笔吧 ✍️</td></tr>');
+      (ck.length ? ck.map((x) => `<tr><td>${esc(x.date)}</td><td>+${x.word_delta}</td><td>${x.total_words}</td><td>${esc(x.note || '')}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">还没有打卡记录，写下第一笔吧 ✍️</td></tr>');
   } catch (e) { $('#pgStats').innerHTML = '<span class="stat-chip">❌ ' + esc(e.message) + '</span>'; }
 }
 $('#pgTargetBtn').addEventListener('click', async () => {
   try {
-    const d = await api.req('/api/thesis', { method: 'PUT', body: JSON.stringify({ target_words: Number($('#pgTarget').value) }) });
-    alert('目标已设为 ' + d.target_words + ' 字');
+    const t = await L().getThesis(api.userId);
+    t.target_words = Math.min(Math.max(Number($('#pgTarget').value) || 30000, 1000), 1000000);
+    await L().saveThesis(api.userId, t);
+    alert('目标已设为 ' + t.target_words + ' 字（仅存本浏览器）');
     renderProgress();
   } catch (e) { alert(e.message); }
 });
 $('#pgCheckinBtn').addEventListener('click', async () => {
   try {
-    const d = await api.req('/api/checkins', { method: 'POST', body: JSON.stringify({ note: $('#pgNote').value }) });
-    alert(d.message);
+    const t = await L().getThesis(api.userId);
+    const flat = await L().getChapters(api.userId);
+    const p = DingaoLocal.computeProgress(DingaoLocal.buildTree(flat), t.target_words);
+    const cur = await L().getCheckins(api.userId);
+    const r = DingaoLocal.addCheckin(cur, p.total_words, $('#pgNote').value);
+    await L().saveCheckins(api.userId, r.checkins);
+    alert(`✅ ${r.checkin.date} 打卡成功：今日已写 ${r.checkin.word_delta} 字（仅存本浏览器）`);
     $('#pgNote').value = '';
     renderProgress();
   } catch (e) { alert(e.message); }
