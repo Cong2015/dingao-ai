@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>定稿AI · 交稿之前，先定稿</title>
+<link rel="stylesheet" href="styles.css?v=4">
+</head>
+<body>
+<div class="app">
+
+  <!-- 左侧：主要功能导航 -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="seal">定</span>
+      <div class="brand-txt"><b>定稿AI</b><span>交稿之前 · 先定稿</span></div>
+    </div>
+    <nav>
+      <div class="nav-group">
+        <div class="nav-title">✍️ 写作辅助</div>
+        <button class="nav-item active" data-fn="topic">🎯 选题助手<span class="tag">M9</span></button>
+        <button class="nav-item" data-fn="outline">📑 大纲生成<span class="tag">M10</span></button>
+        <button class="nav-item" data-fn="writing">📝 本地编写<span class="tag">M11</span></button>
+        <button class="nav-item" data-fn="progress">📊 进度打卡<span class="tag">M12</span></button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-title">🌐 文献工具</div>
+        <button class="nav-item" data-fn="translate">🌏 中英互译<span class="tag">M4</span></button>
+        <button class="nav-item" data-fn="analyze">🔬 四要素分析</button>
+        <button class="nav-item" data-fn="review">📚 参考版综述</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-title">🧾 交稿核查</div>
+        <button class="nav-item" data-fn="checkreport">📋 交稿检查报告<span class="tag">M8</span></button>
+        <button class="nav-item" data-fn="citecheck">🔗 引用核查</button>
+        <button class="nav-item" data-fn="proofread">✅ 分段校对</button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-title">🗂️ 我的</div>
+        <button class="nav-item" data-fn="records">📁 记录</button>
+      </div>
+    </nav>
+    <div class="side-foot">
+      <div class="access-info" id="accessInfo">访问地址：检测中…</div>
+      <button id="keyBtn" class="key-btn hidden">🔑 我的Key</button>
+      <div class="user-row">
+        <span id="userName" class="uname hidden"></span>
+        <button id="loginBtn" class="mini-btn">登录 / 注册</button>
+        <button id="logoutBtn" class="mini-btn ghost hidden">退出</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 右侧主区 -->
+  <main class="main">
+    <header class="topbar">
+      <div class="fn-head">
+        <h1 id="fnTitle">选题助手</h1>
+        <p id="fnDesc">从实际问题出发，AI 生成选题建议，可追问迭代、一键采纳</p>
+      </div>
+      <div class="badges">
+        <span id="aiStatus" class="pill pill-gray">● 检测中…</span>
+      </div>
+    </header>
+
+    <!-- 写作四视图（V1.3：选题/大纲/编写/进度） -->
+    <div id="writeViews" class="write-views">
+
+      <!-- M9 选题助手 -->
+      <div id="view-topic" class="write-view">
+        <div class="panel">
+          <div class="panel-head"><b>🎯 从实际问题出发</b><span class="meta">AI 帮你提炼 3-5 个可研究选题（参考研墨系统实测形态）</span></div>
+          <div class="topic-form">
+            <label>实际工程问题 *（研究起点）
+              <textarea id="tpProblem" rows="4" placeholder="描述你遇到的实际工程问题：背景、现象、数据、困惑……&#10;如：某博物馆建筑围护结构改造后，暖通空调系统能耗仍高于设计值 20%……"></textarea></label>
+            <label>已读文献（可选，粘贴标题＋摘要，多条之间空行分隔）
+              <textarea id="tpLits" rows="3" placeholder="标题:博物馆建筑能耗影响因素研究&#10;摘要:……"></textarea></label>
+            <div class="form-row3">
+              <label>所属工程领域<input id="tpDiscipline" placeholder="如：工程管理"></label>
+              <label>个人研究兴趣<input id="tpInterests" placeholder="如：既有建筑低碳改造"></label>
+              <label>建议数量
+                <select id="tpCount"><option value="3">3 个</option><option value="4">4 个</option><option value="5" selected>5 个</option></select></label>
+            </div>
+            <button id="tpGenBtn" class="run-btn">✨ 生成选题建议</button>
+            <p class="hint" id="tpStatus">选题仅基于你提供的信息推断，由AI生成、需人工核验；采纳后自动生成标准章节结构。</p>
+          </div>
+        </div>
+        <div id="tpList" class="topic-list"></div>
+        <div id="tpAskWrap" class="panel hidden">
+          <div class="panel-head"><b>💬 追问与迭代</b><span class="meta">基于会话上下文重新生成选题建议</span></div>
+          <div id="tpHistory" class="tp-history"></div>
+          <div class="tp-ask-row">
+            <input id="tpAsk" placeholder="如：哪个方向的数据最好获取？能否换成 XX 方法？">
+            <button id="tpAskBtn" class="btn primary">追问</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- M10 大纲生成 -->
+      <div id="view-outline" class="write-view">
+        <div class="panel">
+          <div class="panel-head">
+            <b>📑 论文大纲</b>
+            <span class="meta" id="olThesisTitle"></span>
+            <div class="spacer"></div>
+            <button id="olExportTxt" class="btn ghost small">导出.txt</button>
+            <button id="olExportDocx" class="btn ghost small">导出.docx</button>
+          </div>
+          <div class="ol-gen-row">
+            <input id="olGenTitle" placeholder="选题/论文标题（AI 生成大纲用）">
+            <input id="olGenExtra" placeholder="补充信息（可选）：关键词/资料说明">
+            <button id="olGenBtn" class="btn">🤖 AI 生成大纲</button>
+            <button id="olApplyGen" class="btn primary hidden">✅ 应用生成的大纲</button>
+          </div>
+          <p class="hint" id="olStatus">大纲由AI生成、需人工核验；双击标题可直接改名，改动自动保存。</p>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><b>🌲 大纲树</b><span class="meta" id="olSaveState">改动自动保存</span>
+            <div class="spacer"></div>
+            <button id="olAddCh" class="btn ghost small">＋ 新增章</button>
+          </div>
+          <div id="olTree" class="ol-tree"></div>
+        </div>
+      </div>
+
+      <!-- M11 本地编写 -->
+      <div id="view-writing" class="write-view">
+        <div id="chBackupWarn" class="backup-warn hidden">⚠️ 已超过 7 天未导出 Word 备份，建议立即导出，防止内容丢失</div>
+        <div class="write-layout">
+          <aside class="chapter-side">
+            <div class="panel-head"><b>📚 章节</b></div>
+            <div id="chList" class="ch-list"></div>
+            <button id="chAdd" class="btn ghost" style="width:100%;margin-top:8px">＋ 新建章节</button>
+          </aside>
+          <section class="ch-main">
+            <div class="panel-head">
+              <b id="chTitle">—</b>
+              <span class="meta" id="chSaveState">未开始</span>
+              <div class="spacer"></div>
+              <select id="chStatus" class="mini-select">
+                <option value="todo">未开始</option>
+                <option value="writing">写作中</option>
+                <option value="done">已完成</option>
+              </select>
+              <button id="chExportDocx" class="btn ghost small">💾 导出全文Word</button>
+              <button id="chExportTxt" class="btn ghost small">导出txt</button>
+            </div>
+            <textarea id="chEditor" placeholder="选择左侧章节开始写作。内容仅存本机数据库（不上传云端），自动保存，其他未授权用户无法查阅。"></textarea>
+            <div class="ch-meta"><span id="chCharCount">0 字</span><span class="privacy-note">🔒 仅存本机 · 不上云 · 未授权不可查阅</span></div>
+          </section>
+        </div>
+      </div>
+
+      <!-- M12 进度打卡 -->
+      <div id="view-progress" class="write-view">
+        <div class="panel">
+          <div class="panel-head"><b>📊 写作进度</b><span class="meta" id="pgThesis"></span></div>
+          <div class="pg-body">
+            <div class="progress"><div id="pgBar"></div></div>
+            <div class="stats-row" id="pgStats"></div>
+            <div class="pg-grid">
+              <label>目标字数<input type="number" id="pgTarget" min="1000" step="1000"></label>
+              <button id="pgTargetBtn" class="btn">设置目标</button>
+              <input id="pgNote" placeholder="打卡备注（可选）">
+              <button id="pgCheckinBtn" class="btn primary">📝 今日打卡</button>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><b>章节统计</b><span class="meta">确定性统计 · 零AI成本</span></div>
+          <table class="fmt-table" id="pgChapterTable"><tr><th>章节</th><th>字数</th><th>状态</th></tr></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><b>打卡记录</b><span class="meta" id="pgStreak"></span></div>
+          <table class="fmt-table" id="pgCheckinTable"><tr><th>日期</th><th>当日字数</th><th>累计字数</th><th>备注</th></tr></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 工具类工作区（互译/校对/四要素/综述/引用核查/交稿检查/记录） -->
+    <div class="workspace" id="workspace">
+      <!-- 编辑器 -->
+      <section class="panel editor-panel">
+        <div class="panel-head">
+          <b id="editorTitle">📝 原文 / 输入</b>
+          <span class="meta" id="charCount">0 字</span>
+        </div>
+        <textarea id="editor" placeholder="在此粘贴论文草稿 / 文献段落 / 待翻译内容……&#10;&#10;支持直接粘贴、文件导入（.txt / .docx / .pdf 文本层）"></textarea>
+        <div id="docList" class="doclist hidden"></div>
+        <div class="toolbar">
+          <button id="importBtn" class="btn ghost">📂 导入文件</button>
+          <input type="file" id="fileInput" accept=".txt,.md,.docx,.pdf" hidden>
+          <input type="file" id="multiInput" accept=".txt,.md,.docx,.pdf" multiple hidden>
+          <button id="sampleBtn" class="btn ghost">✨ 示例</button>
+          <button id="clearBtn" class="btn ghost">🗑 清空</button>
+          <button id="undoBtn" class="btn ghost" title="撤销最近一次编辑/替换（保留7次）">↩️ 撤销</button>
+        </div>
+      </section>
+
+      <!-- 细部选项 -->
+      <section class="panel opts-panel">
+        <div class="panel-head"><b>⚙️ 细部选项</b></div>
+        <div id="opts" class="opts"></div>
+        <button id="runBtn" class="run-btn">▶ 开始处理</button>
+        <p class="hint" id="fnHint"></p>
+      </section>
+    </div>
+
+    <!-- 结果 -->
+    <section class="panel result-panel" id="resultPanel">
+      <div class="panel-head">
+        <b>📄 处理结果</b>
+        <span class="meta" id="resultStatus">等待处理</span>
+        <div class="spacer"></div>
+        <button id="copyBtn" class="btn ghost small">复制</button>
+        <button id="saveBtn" class="btn ghost small">保存记录</button>
+        <button id="exportTxtBtn" class="btn ghost small">导出 .txt</button>
+        <button id="exportDocxBtn" class="btn ghost small">导出 .docx</button>
+      </div>
+      <div id="progressWrap" class="progress-wrap hidden">
+        <div class="progress"><div id="progressBar"></div></div>
+        <span id="progressText"></span>
+      </div>
+      <div id="resultBox" class="result-box"></div>
+    </section>
+  </main>
+</div>
+
+<!-- 登录弹窗 -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><b id="modalTitle">登录定稿AI</b><button id="modalClose" class="btn ghost small">✕</button></div>
+    <label>用户名<input id="authUser" placeholder="2-20位中英文/数字"></label>
+    <label>密码<input id="authPass" type="password" placeholder="至少6位"></label>
+    <div id="authMsg" class="msg"></div>
+    <div class="row gap">
+      <button id="authSubmit" class="btn primary">登录</button>
+      <button id="authToggle" class="btn ghost">去注册</button>
+    </div>
+    <div class="msg" id="authAccess"></div>
+  </div>
+</div>
+
+<!-- 我的Key弹窗 -->
+<div id="keyModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><b>🔑 我的 API Key</b><button id="keyClose" class="btn ghost small">✕</button></div>
+    <p class="hint">使用你自己的 DeepSeek Key 调用大模型（Key 仅加密存于服务端，永不下发）。保存前会做初步本地核对（格式＋连通性验证）。</p>
+    <div id="keyStatus" class="msg"></div>
+    <label>DeepSeek API Key<input id="keyInput" placeholder="sk-…"></label>
+    <div class="row gap">
+      <button id="keySave" class="btn primary">核对并保存</button>
+      <button id="keyDelete" class="btn ghost">删除我的Key</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js?v=4"></script>
+</body>
+</html>

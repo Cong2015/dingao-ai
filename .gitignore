@@ -1,0 +1,13 @@
+# 依赖
+node_modules/
+
+# 数据与密钥（含用户论文数据/加密密钥/API密钥——严禁提交）
+dingao.db
+logs/
+config/secret.key
+config/key.txt
+
+# 测试产物
+test/test.db
+test/debug.db
+test/last_run.txt
