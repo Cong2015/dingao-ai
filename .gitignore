@@ -10,4 +10,5 @@ config/key.txt
 # 测试产物
 test/test.db
 test/debug.db
+test/retest.db
 test/last_run.txt
