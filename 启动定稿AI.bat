@@ -1,48 +1,40 @@
 @echo off
-chcp 65001 >nul
-title å®šç¨¿AI v0.3 - äº¤ç¨¿ä¹‹å‰ï¼Œå…ˆå®šç¨¿
+title ¶¨¸åAI v0.4 - ½»¸åÖ®Ç°£¬ÏÈ¶¨¸å
 cd /d "%~dp0"
 
-echo ==============================================
-echo   å®šç¨¿AI v0.3 - äº¤ç¨¿ä¹‹å‰ï¼Œå…ˆå®šç¨¿
-echo ==============================================
+REM node Â·¾¶¶µµ×£¨ÏµÍ³PATHÓ¦ÓÐnodejs£¬´Ë´¦Ë«±£ÏÕ£©
+set "PATH=C:\Program Files\nodejs;%PATH%"
 
-REM ---- 0. æœåŠ¡å·²åœ¨è¿è¡Œï¼Ÿç›´æŽ¥æ‰“å¼€æµè§ˆå™¨ ----
+REM ---- 0. ·þÎñÒÑÔÚÔËÐÐ£¿Ö±½Ó´ò¿ªä¯ÀÀÆ÷ ----
 netstat -ano | findstr ":8788" | findstr "LISTENING" >nul 2>&1
-if %errorlevel%==0 (
-  echo [OK] æœåŠ¡å·²åœ¨è¿è¡Œï¼Œæ­£åœ¨æ‰“å¼€æµè§ˆå™¨...
+if not errorlevel 1 (
+  echo [OK] ·þÎñÒÑÔÚÔËÐÐ£¬ÕýÔÚ´ò¿ªä¯ÀÀÆ÷...
   start "" http://localhost:8788
-  timeout /t 8
+  timeout /t 8 >nul
   exit
 )
 
-REM ---- 1. é˜²ç«å¢™æ”¾è¡Œï¼ˆå…¶ä»–ç”µè„‘è®¿é—®å¿…éœ€ï¼›ä»…é¦–æ¬¡éœ€ç®¡ç†å‘˜æƒé™ï¼‰ ----
+REM ---- 1. ·À»ðÇ½·ÅÐÐ£¨Òì²½£¬²»×èÈûÆô¶¯£»Ê×´Îµ¯ UAC µã"ÊÇ"¼´¿É£© ----
 netsh advfirewall firewall show rule name="dingao-ai-8788" >nul 2>&1
 if errorlevel 1 (
-  echo [é˜²ç«å¢™] æœªæ£€æµ‹åˆ°æ”¾è¡Œè§„åˆ™ï¼Œå°è¯•æ·»åŠ ï¼ˆå¦‚å¼¹å‡º UAC è¯·ç‚¹"æ˜¯"ï¼Œä»…éœ€ä¸€æ¬¡ï¼‰...
   netsh advfirewall firewall add rule name="dingao-ai-8788" dir=in action=allow protocol=TCP localport=8788 >nul 2>&1
   if errorlevel 1 (
-    powershell -NoProfile -Command "Start-Process cmd -ArgumentList '/c netsh advfirewall firewall add rule name=\"dingao-ai-8788\" dir=in action=allow protocol=TCP localport=8788' -Verb RunAs -Wait"
-  )
-  netsh advfirewall firewall show rule name="dingao-ai-8788" >nul 2>&1
-  if errorlevel 1 (
-    echo [è­¦å‘Š] é˜²ç«å¢™è§„åˆ™ä»æœªæ·»åŠ ï¼šå…¶ä»–ç”µè„‘å°†æ— æ³•è®¿é—®ã€‚å¯å³é”®æœ¬è„šæœ¬"ä»¥ç®¡ç†å‘˜èº«ä»½è¿è¡Œ"ï¼Œæˆ–æ‰‹åŠ¨æ‰§è¡Œï¼š
-    echo   netsh advfirewall firewall add rule name="dingao-ai-8788" dir=in action=allow protocol=TCP localport=8788
+    echo [·À»ðÇ½] ÒÑµ¯³ö¹ÜÀíÔ±ÊÚÈ¨´°¿Ú£ºÇëµã"ÊÇ"·ÅÐÐ£¨½öÐèÒ»´Î£¬²»Ó°Ïì·þÎñÆô¶¯£©...
+    start "" powershell -NoProfile -Command "Start-Process cmd -ArgumentList '/c netsh advfirewall firewall add rule name=\"dingao-ai-8788\" dir=in action=allow protocol=TCP localport=8788' -Verb RunAs"
   ) else (
-    echo [OK] é˜²ç«å¢™å·²æ”¾è¡Œ TCP 8788ï¼Œå±€åŸŸç½‘ç”µè„‘å¯è®¿é—®
+    echo [OK] ·À»ðÇ½ÒÑ·ÅÐÐ TCP 8788£¬¾ÖÓòÍøµçÄÔ¿É·ÃÎÊ
   )
 ) else (
-  echo [OK] é˜²ç«å¢™è§„åˆ™å·²å­˜åœ¨
+  echo [OK] ·À»ðÇ½¹æÔòÒÑ´æÔÚ
 )
 
-REM ---- 2. å¯åŠ¨æœåŠ¡ï¼ˆçœ‹é—¨ç‹—ï¼šå¼‚å¸¸é€€å‡º 3 ç§’åŽè‡ªåŠ¨é‡å¯ï¼‰ ----
-echo [å¯åŠ¨] æœåŠ¡å¯åŠ¨ä¸­... å¯åŠ¨å®ŒæˆåŽè‡ªåŠ¨æ‰“å¼€æµè§ˆå™¨ã€‚
-echo        å±€åŸŸç½‘åœ°å€ä»¥çª—å£è¾“å‡ºä¸ºå‡†ï¼ˆIP å˜åŒ–æ—¶ä¼šè‡ªåŠ¨æ˜¾ç¤ºæ–°åœ°å€ï¼‰ã€‚
+REM ---- 2. Æô¶¯·þÎñ£¨¿´ÃÅ¹·£ºÒì³£ÍË³ö 3 Ãëºó×Ô¶¯ÖØÆô£© ----
+echo [Æô¶¯] ·þÎñÆô¶¯ÖÐ£¬ä¯ÀÀÆ÷½«×Ô¶¯´ò¿ª...
 start /b cmd /c "timeout /t 3 /nobreak >nul && start "" http://localhost:8788"
 :loop
 node server.js
 echo.
-echo [çœ‹é—¨ç‹—] %date% %time% æœåŠ¡é€€å‡ºï¼Œ3 ç§’åŽè‡ªåŠ¨é‡å¯ï¼ˆå…³é—­æœ¬çª—å£å³åœæ­¢æœåŠ¡ï¼‰...
-echo [çœ‹é—¨ç‹—] %date% %time% æœåŠ¡é€€å‡º >> logs\watchdog.log
+echo [¿´ÃÅ¹·] %date% %time% ·þÎñÍË³ö£¬3 Ãëºó×Ô¶¯ÖØÆô£¨¹Ø±Õ±¾´°¿Ú¼´Í£Ö¹·þÎñ£©...
+echo [¿´ÃÅ¹·] %date% %time% ·þÎñÍË³ö >> logs\watchdog.log
 timeout /t 3 /nobreak >nul
 goto loop

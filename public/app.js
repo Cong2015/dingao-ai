@@ -2,6 +2,14 @@
 // 布局：左侧主要功能导航 + 主区（编辑器/细部选项/结果）
 'use strict';
 const $ = (s) => document.querySelector(s);
+// 全局错误横幅：任何脚本错误直接显示在页面顶部（不再静默失效）
+window.addEventListener('error', (e) => {
+  const el = $('#jsError');
+  if (el) {
+    el.classList.remove('hidden');
+    el.textContent = '⚠️ 页面脚本出错：' + (e && e.message ? e.message : '未知错误') + '（请按 Ctrl+F5 刷新；仍出现请截图反馈）';
+  }
+});
 const api = {
   token: localStorage.getItem('dg_token') || '',
   async req(path, opt = {}) {
@@ -126,11 +134,20 @@ function modelOpts() {
 // ============================================================
 // 导航切换
 // ============================================================
-document.querySelectorAll('.nav-item').forEach((a) => a.addEventListener('click', () => {
-  document.querySelectorAll('.nav-item').forEach((x) => x.classList.remove('active'));
-  a.classList.add('active');
+// 导航：点击左侧命令 → 右侧立即切换到对应操作页面（高亮同步）
+function setActiveNav(fn) {
+  document.querySelectorAll('.nav-item').forEach((x) => x.classList.toggle('active', x.dataset.fn === fn));
+}
+document.querySelectorAll('.nav-item').forEach((a) => a.addEventListener('click', (e) => {
+  e.preventDefault();
+  setActiveNav(a.dataset.fn);
   switchFn(a.dataset.fn);
 }));
+// hash 路由兜底：刷新页面/浏览器前进后退也回到对应功能页
+window.addEventListener('hashchange', () => {
+  const fn = (location.hash || '').replace(/^#\/?/, '') || 'topic';
+  if (FNS[fn] || WRITE_FNS.includes(fn)) { setActiveNav(fn); switchFn(fn); }
+});
 const WRITE_FNS = ['topic', 'outline', 'writing', 'progress'];
 const WRITE_META = {
   topic: ['选题助手', '从实际问题出发，AI 生成 3-5 个选题建议（六要素），可追问迭代、一键采纳'],
@@ -588,6 +605,7 @@ async function authSubmit() {
       const d = await api.req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) });
       api.token = d.token; localStorage.setItem('dg_token', d.token);
       setAuth(true, '登录成功'); hideModal(); refreshUser(); loadRecords();
+      switchFn(currentFn);   // 登录成功后立即渲染当前功能页（避免停在登录前状态）
     } else {
       await api.req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username, password }) });
       setAuth(true, '注册成功，请登录'); authMode = 'login'; $('#modalTitle').textContent = '登录定稿AI'; $('#authSubmit').textContent = '登录'; $('#authToggle').textContent = '去注册';
@@ -603,7 +621,7 @@ async function refreshUser() {
     $('#userName').classList.remove('hidden');
     $('#loginBtn').classList.add('hidden'); $('#logoutBtn').classList.remove('hidden');
     $('#keyBtn').classList.remove('hidden');
-    if (u.keyMasked) $('#keyBtn').textContent = '🔑 ' + u.keyMasked;
+    $('#keyBtn').textContent = '🔑 API Key';   // 不显示 sk- 掩码，仅钥匙图标＋标签
   } catch { api.token = ''; api.userId = null; localStorage.removeItem('dg_token'); }
 }
 async function logout() { await api.req('/api/auth/logout', { method: 'POST' }).catch(() => {}); api.token = ''; api.userId = null; localStorage.removeItem('dg_token'); refreshUser(); loadRecords(); }
@@ -613,8 +631,8 @@ async function loadKeyStatus() {
     const s = $('#keyStatus');
     s.className = 'msg';
     const me = await api.req('/api/auth/me').catch(() => ({}));
-    if (k.hasKey) s.textContent = '已配置：' + k.masked + '（' + (k.verified ? '核对通过' : '待核对') + '）';
-    else if (me.isAdmin) s.textContent = '未配置个人Key。管理员可直接使用平台Key（你自己的API）——普通用户需配置个人Key。';
+    if (k.hasKey) s.textContent = '已配置：密钥已加密保存，' + (k.verified ? '核对通过 ✓' : '待核对');
+    else if (me.isAdmin) s.textContent = '未配置个人Key。管理员可直接使用平台Key——普通用户需配置个人Key。';
     else s.textContent = '未配置。平台Key暂仅管理员可用（付费功能上线后开放借用），请配置你自己的Key。';
   } catch (e) { const s = $('#keyStatus'); s.className = 'msg err'; s.textContent = e.message; }
 }
@@ -627,13 +645,13 @@ $('#keySave').addEventListener('click', async () => {
   s.textContent = '本地核对中（格式＋连通性验证）…';
   try {
     const d = await api.req('/api/apikey', { method: 'PUT', body: JSON.stringify({ key }) });
-    s.className = 'msg ok'; s.textContent = d.message + '：' + d.masked;
-    $('#keyBtn').textContent = '🔑 ' + d.masked;
+    s.className = 'msg ok'; s.textContent = d.message + '（密钥已加密保存，不显示明文/掩码）';
+    $('#keyBtn').textContent = '🔑 API Key';
     refreshUser();
   } catch (e) { s.className = 'msg err'; s.textContent = e.message; }
 });
 $('#keyDelete').addEventListener('click', async () => {
-  try { await api.req('/api/apikey', { method: 'DELETE' }); $('#keyBtn').textContent = '🔑 我的Key'; const s = $('#keyStatus'); s.className = 'msg ok'; s.textContent = '已删除，AI功能恢复为平台Key规则'; refreshUser(); }
+  try { await api.req('/api/apikey', { method: 'DELETE' }); $('#keyBtn').textContent = '🔑 API Key'; const s = $('#keyStatus'); s.className = 'msg ok'; s.textContent = '已删除，AI功能恢复为平台Key规则'; refreshUser(); }
   catch (e) { const s = $('#keyStatus'); s.className = 'msg err'; s.textContent = e.message; }
 });
 

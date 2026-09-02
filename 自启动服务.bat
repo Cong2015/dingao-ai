@@ -1,8 +1,9 @@
 @echo off
 cd /d "%~dp0"
-REM å¼€æœºè‡ªå¯è¾…åŠ©ï¼šç«¯å£å·²è¢«å ç”¨ï¼ˆä¾‹å¦‚æ‰‹åŠ¨çª—å£å·²åœ¨è¿è¡Œï¼‰åˆ™ç›´æŽ¥é€€å‡º
+set "PATH=C:\Program Files\nodejs;%PATH%"
+REM ¿ª»ú×ÔÆô¸¨Öú£º¶Ë¿ÚÒÑ±»Õ¼ÓÃ£¨ÀýÈçÊÖ¶¯´°¿ÚÒÑÔÚÔËÐÐ£©ÔòÖ±½ÓÍË³ö
 netstat -ano | findstr ":8788" | findstr "LISTENING" >nul 2>&1
-if %errorlevel%==0 exit /b
+if not errorlevel 1 exit /b
 :loop
 node server.js >> logs\autostart.log 2>&1
 timeout /t 3 /nobreak >nul

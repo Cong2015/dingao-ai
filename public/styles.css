@@ -242,6 +242,14 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
 .row.gap { display: flex; gap: 10px; justify-content: flex-end; }
 
 .hidden { display: none !important; }
+
+/* 脚本错误横幅 */
+.js-error {
+  position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 300;
+  background: var(--err-soft); color: #B54545; border: 1px solid #F3B8B8;
+  border-radius: 10px; padding: 10px 20px; font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); max-width: 86vw;
+}
 .ai-note { color: #A6ADBB; font-size: 12px; border-top: 1px dashed var(--line); margin-top: 12px; padding-top: 10px; }
 
 /* ---------- 写作四视图（V1.3） ---------- */
