@@ -345,6 +345,7 @@ check('TC-94 前端不再调用服务端论文存储端点', !appjs.includes('/a
 check('TC-95 写作自动保存为本地写库', appjs.includes('saveChapter') && appjs.includes('saveChapters(api.userId'));
 check('TC-96 选题追问走纯中转iterate', appjs.includes('/api/topics/iterate') && !appjs.includes('/api/topics/sessions/'));
 check('TC-97 前端无内嵌密钥与明文Key', !/sk-[A-Za-z0-9]{16,}/.test(appjs) && !/sk-[A-Za-z0-9]{16,}/.test(idx) && !/sk-[A-Za-z0-9]{16,}/.test(localjs));
+check('TC-98 本地模式支持(未登录可写作/AI提示后端)', appjs.includes('localId') && appjs.includes("'guest'") && appjs.includes('后端未连接'));
 
 server.kill();
 console.log('\n========== 测试结果 ==========');
