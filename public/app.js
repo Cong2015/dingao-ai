@@ -2,6 +2,9 @@
 // 布局：左侧主要功能导航 + 主区（编辑器/细部选项/结果）
 'use strict';
 const $ = (s) => document.querySelector(s);
+// API 地址：github.io 静态托管时跨域指向公网后端（cpolar 隧道）；本地/局域网同源为空串
+const REMOTE_API = 'https://YOUR-DOMAIN';
+const API_BASE = /github\.io$/i.test(location.hostname) ? REMOTE_API : '';
 // 全局错误横幅：任何脚本错误直接显示在页面顶部（不再静默失效）
 window.addEventListener('error', (e) => {
   const el = $('#jsError');
@@ -16,7 +19,7 @@ const api = {
     const headers = { ...(opt.headers || {}) };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     if (opt.body && typeof opt.body === 'string' && !opt.raw) headers['Content-Type'] = 'application/json';
-    const r = await fetch(path, { ...opt, headers });
+    const r = await fetch(API_BASE + path, { ...opt, headers });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || `请求失败(${r.status})`);
     return data;
@@ -299,7 +302,7 @@ async function runStream(path, text, extraParams) {
     temperature: Number($('#optTemp')?.value || 0.3),
     ...extraParams,
   };
-  const r = await fetch(path, { method: 'POST', headers, body: JSON.stringify({ text, params }) });
+  const r = await fetch(API_BASE + path, { method: 'POST', headers, body: JSON.stringify({ text, params }) });
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `请求失败(${r.status})`); }
   const reader = r.body.getReader(); const dec = new TextDecoder();
   $('#resultBox').innerHTML = '<div></div>';
@@ -343,7 +346,7 @@ async function runProofread(text) {
     temperature: Number($('#optTemp')?.value || 0.3),
     maxChunk: Number($('#optChunk')?.value || 2500),
   };
-  const r = await fetch('/api/ai/proofread', { method: 'POST', headers, body: JSON.stringify({ text, params }) });
+  const r = await fetch(API_BASE + '/api/ai/proofread', { method: 'POST', headers, body: JSON.stringify({ text, params }) });
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `请求失败(${r.status})`); }
   proofreadState = { chunks: [], chunkTexts: [], allFixes: [], chunkStatus: [] };
   const box = $('#resultBox');
@@ -432,7 +435,7 @@ async function retryChunk(index) {
   const headers = { Authorization: `Bearer ${api.token}`, 'Content-Type': 'application/json' };
   const card = $('#chunk-' + index);
   card.querySelector('.chunk-head').innerHTML = `<b>第 ${index + 1} 块</b><span>重试中…</span><span class="spacer" style="flex:1"></span>`;
-  const r = await fetch('/api/ai/proofread-chunk', { method: 'POST', headers, body: JSON.stringify({ text, params: { model: $('#optModel')?.value || 'deepseek-v4-flash', temperature: Number($('#optTemp')?.value || 0.3) } }) });
+  const r = await fetch(API_BASE + '/api/ai/proofread-chunk', { method: 'POST', headers, body: JSON.stringify({ text, params: { model: $('#optModel')?.value || 'deepseek-v4-flash', temperature: Number($('#optTemp')?.value || 0.3) } }) });
   if (!r.ok) { const d = await r.json().catch(() => ({})); alert('重试失败：' + (d.error || r.status)); return; }
   const reader = r.body.getReader(); const dec = new TextDecoder();
   let buf = '', content = '', truncated = false;
@@ -575,7 +578,7 @@ async function doExport(fmt) {
   if (!lastResult.trim()) { setResult('⚠️ 暂无结果可导出', true); return; }
   try {
     const d = { title: FNS[currentFn].title + '结果', sections: [{ heading: FNS[currentFn].title + '结果', body: lastResult }] };
-    const r = await fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...d, fmt }) });
+    const r = await fetch(API_BASE + '/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...d, fmt }) });
     if (!r.ok) throw new Error('导出失败');
     const blob = await r.blob();
     const a = document.createElement('a');

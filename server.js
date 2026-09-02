@@ -403,6 +403,15 @@ function formatCheck(meta) {
 const app = express();
 app.disable('x-powered-by');
 app.use((req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); next(); });
+// CORS：允许 GitHub Pages 静态前端跨域调用本服务（本地/局域网同源不受影响；Bearer 头模式无需凭证）
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Filename');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 app.use(express.json({ limit: '8mb' }));
 app.use(express.static(path.join(__dirname, 'public'), { setHeaders: (res) => { res.setHeader('Cache-Control', 'no-cache'); } }));
 
