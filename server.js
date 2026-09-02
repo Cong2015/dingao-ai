@@ -205,6 +205,12 @@ function chunkText(text, maxLen = 2500) {
 // ---------- DeepSeek 调用（非流式单次获取；检测截断与空输出） ----------
 // v0.2实测：V4是推理模型，思考(reasoning)与答案共用输出预算——显式设小max_tokens会饿死答案（fr=length且content为空）；
 // 不设max_tokens时API默认预算充足：2500字块0.8s完成、输出完整。仅在调用方显式传maxTokens时才设置。
+// AI 中转自动重试（DeepSeek 瞬时故障时再试一次，提升夜间/高峰期成功率；两次都失败才报错）
+async function dsCallRetry(task, text, params, key) {
+  const r = await dsCall(task, text, params, key);
+  if (r.ok) return r;
+  return dsCall(task, text, params, key);
+}
 async function dsCall(task, text, params, key) {
   const model = MODELS.includes(params.model) ? params.model : MODELS[0];
   const body = {
@@ -451,7 +457,8 @@ app.get('/api/auth/me', (req, res) => {
 // ---------- AI 分段校对（M5：智能分段·逐块·SSE进度·截断自动细分·单块失败不阻塞） ----------
 // 注意：本组路由必须先于 /api/ai/:task 注册，否则会被通配路由吞掉
 async function proofreadChunkOnce(chunk, params, key, depth) {
-  const r = await dsCall('proofread', chunk, params, key);
+  let r = await dsCall('proofread', chunk, params, key);
+  if (!r.ok) r = await dsCall('proofread', chunk, params, key);   // 瞬时故障自动重试一次
   if (!r.ok) return { ok: false, error: r.error };
   if (!r.content.trim()) {
     // 输出为空：模型思考耗尽预算——缩小块重试（最多细分两级）
@@ -693,7 +700,7 @@ app.post('/api/topics/suggest', rateLimit, async (req, res) => {
   const rk = resolveKeyFor(id);
   if (!rk) return res.status(403).json({ error: 'AI功能需要API Key：请先在「我的Key」配置你自己的DeepSeek密钥并完成本地核对' });
   const count = Math.min(Math.max(Number(form.count) || 5, 3), 5);
-  const r = await dsCall('topic', problem, { form: { ...form, count }, responseFormat: true, timeoutMs: 180000 }, rk.key);
+  const r = await dsCallRetry('topic', problem, { form: { ...form, count }, responseFormat: true, timeoutMs: 180000 }, rk.key);
   if (!r.ok) return res.status(502).json({ error: r.error });
   const parsed = parseAiJson(r.content);
   if (!parsed.ok || !Array.isArray(parsed.data.topics) || !parsed.data.topics.length) {
@@ -702,7 +709,7 @@ app.post('/api/topics/suggest', rateLimit, async (req, res) => {
   let topics = parsed.data.topics.slice(0, 5).map((t, i) => ({ index: t.index ?? i + 1, ...t }));
   // T-6 口径：六要素齐全率≥80%，不足时自动带修正要求重试一次（V4生成有随机性）
   if (topics.filter(topicSixOk).length < Math.ceil(topics.length * 0.8)) {
-    const r2 = await dsCall('topic', problem, { form: { ...form, count, problem: problem + '（修正要求：上一轮输出有个别选题缺少必要字段——每个选题必须完整包含 title/research_question/innovation_points/relation_to_literature/feasibility(data_availability/method_maturity/time_estimate)/reasons 全部6个字段，请自查后重新输出）' }, responseFormat: true, timeoutMs: 180000 }, rk.key);
+    const r2 = await dsCallRetry('topic', problem, { form: { ...form, count, problem: problem + '（修正要求：上一轮输出有个别选题缺少必要字段——每个选题必须完整包含 title/research_question/innovation_points/relation_to_literature/feasibility(data_availability/method_maturity/time_estimate)/reasons 全部6个字段，请自查后重新输出）' }, responseFormat: true, timeoutMs: 180000 }, rk.key);
     if (r2.ok) {
       const p2 = parseAiJson(r2.content);
       if (p2.ok && Array.isArray(p2.data.topics) && p2.data.topics.length) topics = p2.data.topics.slice(0, 5).map((t, i) => ({ index: t.index ?? i + 1, ...t }));
@@ -722,7 +729,7 @@ app.post('/api/topics/iterate', rateLimit, async (req, res) => {
   const hist = Array.isArray(history)
     ? history.map((m) => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 1500)}`).join('\n')
     : String(history || '').slice(0, 8000);
-  const r = await dsCall('topic', hist + '\n用户追问：' + q, { form: {}, responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
+  const r = await dsCallRetry('topic', hist + '\n用户追问：' + q, { form: {}, responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
   if (!r.ok) return res.status(502).json({ error: r.error });
   const parsed = parseAiJson(r.content);
   if (!parsed.ok || !Array.isArray(parsed.data.topics) || !parsed.data.topics.length) {
@@ -730,7 +737,7 @@ app.post('/api/topics/iterate', rateLimit, async (req, res) => {
   }
   let topics = parsed.data.topics.slice(0, 5);
   if (topics.filter(topicSixOk).length < Math.ceil(topics.length * 0.8)) {
-    const r2 = await dsCall('topic', hist + '\n用户追问：' + q + '（修正要求：每个选题必须完整包含 title/research_question/innovation_points/relation_to_literature/feasibility(data_availability/method_maturity/time_estimate)/reasons 全部6个字段，请自查后重新输出）', { form: {}, responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
+    const r2 = await dsCallRetry('topic', hist + '\n用户追问：' + q + '（修正要求：每个选题必须完整包含 title/research_question/innovation_points/relation_to_literature/feasibility(data_availability/method_maturity/time_estimate)/reasons 全部6个字段，请自查后重新输出）', { form: {}, responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
     if (r2.ok) {
       const p2 = parseAiJson(r2.content);
       if (p2.ok && Array.isArray(p2.data.topics) && p2.data.topics.length) topics = p2.data.topics.slice(0, 5);
@@ -746,7 +753,7 @@ app.post('/api/outline/generate', rateLimit, async (req, res) => {
   if (!title) return res.status(400).json({ error: '请提供选题/论文标题（可先采纳选题）' });
   const rk = resolveKeyFor(id);
   if (!rk) return res.status(403).json({ error: 'AI功能需要API Key：请先在「我的Key」配置你自己的DeepSeek密钥并完成本地核对' });
-  const r = await dsCall('outline', title, { title, extra: String((req.body || {}).extra || '').slice(0, 2000), responseFormat: true, timeoutMs: 180000 }, rk.key);
+  const r = await dsCallRetry('outline', title, { title, extra: String((req.body || {}).extra || '').slice(0, 2000), responseFormat: true, timeoutMs: 180000 }, rk.key);
   if (!r.ok) return res.status(502).json({ error: r.error });
   const parsed = parseAiJson(r.content);
   if (!parsed.ok || !Array.isArray(parsed.data.chapters) || !parsed.data.chapters.length) {

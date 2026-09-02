@@ -178,6 +178,8 @@ function switchFn(fn) {
     $('#fnDesc').textContent = d;
     // 本地模式：未登录也可用写作四视图（数据存本浏览器 guest 分库），AI 按钮内各自提示登录
     if (!api.userId) api.userId = 'guest';
+    // 只显示当前功能对应的子视图，其余全部隐藏（修复四视图堆叠显示）
+    ['topic', 'outline', 'writing', 'progress'].forEach((v) => $('#view-' + v).classList.toggle('hidden', v !== fn));
     if (fn === 'topic') renderTopic();
     else if (fn === 'outline') renderOutline();
     else if (fn === 'writing') renderWriting();
