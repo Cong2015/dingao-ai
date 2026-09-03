@@ -53,7 +53,7 @@ function loadEncSecret() {
 const ENC_SECRET = loadEncSecret();
 const encKey = crypto.createHash('sha256').update(ENC_SECRET).digest();
 function enc(s) { const iv = crypto.randomBytes(12); const c = crypto.createCipheriv('aes-256-gcm', encKey, iv); const e = Buffer.concat([c.update(s, 'utf8'), c.final()]); return iv.toString('hex') + ':' + c.getAuthTag().toString('hex') + ':' + e.toString('hex'); }
-function dec(v) { try { const [iv, tag, e] = v.split(':'); const d = crypto.createDecipheriv('aes-256-gcm', encKey, Buffer.from(iv, 'hex')); d.setAuthTag(Buffer.from(tag, 'hex')); return Buffer.concat([d.update(Buffer.from(e, 'hex')), d.final()]).toString('utf8'); } catch { return ''; } }
+function dec(v) { try { const [iv, tag, e] = v.split(':'); const d = crypto.createDecipheriv('aes-256-gcm', encKey, Buffer.from(iv, 'hex'), { authTagLength: 16 }); d.setAuthTag(Buffer.from(tag, 'hex')); return Buffer.concat([d.update(Buffer.from(e, 'hex')), d.final()]).toString('utf8'); } catch { return ''; } }
 const maskKey = (k) => k.slice(0, 5) + '****' + k.slice(-4);
 async function verifyDeepSeekKey(key) {
   if (!/^sk-[A-Za-z0-9]{10,}$/.test(key)) return { ok: false, reason: '格式不正确：应为 sk- 开头的DeepSeek密钥' };
