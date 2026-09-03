@@ -779,3 +779,6 @@ app.listen(PORT, '::', () => {
   console.log(`[定稿AI v0.4] DeepSeek密钥：${API_KEY ? '已加载' : '未配置（功能将返回503）'} · 数据库：${DB_PATH}（仅账号/密钥/记录，无论文数据）`);
   if (IS_TEST) console.log('[定稿AI v0.4] 测试模式');
 });
+
+// ---------- 测试钩子：纯函数导出（单元测试 TC-U01~U10 import 用；不影响服务行为） ----------
+export { chunkText, splitLongPara, citeCheck, docxMeta, formatCheck };

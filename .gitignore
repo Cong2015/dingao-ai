@@ -12,3 +12,7 @@ test/test.db
 test/debug.db
 test/retest.db
 test/last_run.txt
+test/boundary.db
+test/security.db
+test/perf.db
+test/unit.db
