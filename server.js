@@ -773,8 +773,8 @@ function lanUrls() {
 }
 app.get('/api/health', (req, res) => ok(res, { status: 'ok', version: '0.4', models: MODELS, hasKey: !!API_KEY, lanUrls: lanUrls(), local: `http://localhost:${PORT}`, privacy: '论文数据仅存用户浏览器本地，服务端不存储论文内容', time: new Date().toISOString() }));
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[定稿AI v0.4] 服务已启动 http://0.0.0.0:${PORT}`);
+app.listen(PORT, '::', () => {
+  console.log(`[定稿AI v0.4] 服务已启动 http://[::]:${PORT}（IPv4/IPv6 双栈，cpolar 走 [::1] 亦可达）`);
   for (const u of lanUrls()) console.log(`[定稿AI v0.4] 本机访问 ${u} （其他电脑请用此地址，需防火墙放行 TCP ${PORT}）`);
   console.log(`[定稿AI v0.4] DeepSeek密钥：${API_KEY ? '已加载' : '未配置（功能将返回503）'} · 数据库：${DB_PATH}（仅账号/密钥/记录，无论文数据）`);
   if (IS_TEST) console.log('[定稿AI v0.4] 测试模式');
