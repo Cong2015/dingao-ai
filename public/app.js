@@ -40,7 +40,6 @@ let currentFn = 'translate';
 let lastResult = '';
 let lastMeta = null;                    // docx 格式元数据（交稿检查报告用）
 const editorHistory = [];               // 撤销栈（最多7次，PRD AC4）
-const reviewDocs = [];                  // 参考版综述多文献（每批≤6篇）
 let proofreadState = null;              // 分段校对进行中的状态
 // U1修复（v0.5）：各工具功能独立工作区状态——切换功能互不清空，结果不再混用
 const fnState = {};
@@ -74,32 +73,6 @@ const FNS = {
         <select id="optChunk"><option value="1500">1500 字（更稳）</option><option value="2500" selected>2500 字（推荐）</option><option value="3000">3000 字（更快）</option></select></div>
       <div class="opt-row"><span>温度</span><select id="optTemp"><option value="0.3" selected>0.3（稳定）</option><option value="0.7">0.7（多样）</option></select></div>`,
     run: (text) => runProofread(text),
-  },
-  analyze: {
-    title: '文献四要素分析', desc: '单篇文献 → 研究方法 / 核心结论 / 局限不足 / 可切入方向 四张卡片', editorTitle: '📝 文献内容（单篇，≤2万字）',
-    hint: 'M6 · 只基于给定内容推断，不虚构数据；输出标注AI生成需人工核验。',
-    sample: '摘要：本文研究建设单位在商业TOD项目中的多方协同管理机制。方法：基于利益相关者理论，对某商业综合体TOD项目开展案例研究，采用半结构化访谈与问卷调查，收集五类主体协同数据。结论：联合体协议与数据共享平台显著提升协同效率，利益分配机制是协同可持续的关键。局限：单案例研究外部效度有限，未纳入金融机构视角。',
-    opts: () => `
-      <div class="opt-row"><span>模型</span><select id="optModel">${modelOpts()}</select></div>
-      <div class="opt-row"><span>温度</span><select id="optTemp"><option value="0.3" selected>0.3（稳定）</option><option value="0.7">0.7（多样）</option></select></div>`,
-    run: (text) => runStream('/api/ai/analyze', text, {}),
-  },
-  review: {
-    title: '参考版文献综述', desc: '上传 ≤6 篇文献，按主题整合生成参考版综述（引用[1][2]标注）', editorTitle: '📝 文献内容（可导入多篇，每批≤6篇）',
-    hint: 'M7 · 按主题整合而非逐篇罗列；固定AI声明「为参考版，引用与论断均需人工核验后方可使用」。⚠️ 学术边界：输出为参考草稿，禁止直接作为论文章节使用，请自行重写（见学术诚信规范）。',
-    sample: '',
-    opts: () => `
-      <div class="opt-row"><span>模型</span><select id="optModel">${modelOpts()}</select></div>
-      <div class="opt-row"><span>温度</span><select id="optTemp"><option value="0.3" selected>0.3（稳定）</option><option value="0.7">0.7（多样）</option></select></div>
-      <button id="addDocsBtn" class="btn" style="width:100%">📂 添加文献（≤6篇）</button>
-      <div class="opt-note" id="docsNote">已添加 0 / 6 篇</div>`,
-    run: (text) => {
-      const parts = [];
-      reviewDocs.forEach((d, i) => parts.push(`[${i + 1}] ${d.name}\n${d.text}`));
-      if (text.trim()) parts.push(text);
-      if (!parts.length) throw new Error('请先导入或粘贴文献内容');
-      return runStream('/api/ai/review', parts.join('\n\n'), {});
-    },
   },
   citecheck: {
     title: '引用核查', desc: '文内标记 ↔ 文末列表双向核查；序号错位一键修正建议；重复文献识别', editorTitle: '📝 论文全文（含文末参考文献列表）',
@@ -207,13 +180,11 @@ function switchFn(fn) {
   $('#fnHint').textContent = f.hint;
   $('#editorTitle').textContent = f.editorTitle || '';
   $('#editor').classList.toggle('hidden', !!f.hideEditor);
-  $('#docList').classList.toggle('hidden', fn !== 'review');
   if (fn === 'records') { $('#runBtn').textContent = '🔄 刷新记录'; } else { $('#runBtn').textContent = '▶ 开始处理'; }
   $('#opts').innerHTML = f.opts ? f.opts() : '';
   bindFnOpts(fn);
   restoreFnState(fn);
   if (fn === 'records') { loadRecords(); }
-  if (fn === 'review') renderDocs();
 }
 // U1：各功能工作区快照与恢复（编辑器内容/结果面板/结果文本/状态）
 function saveFnState(fn) {
@@ -258,10 +229,6 @@ window.jumpTo = (n) => {
   ed.setSelectionRange(idx, idx + String(n).length + 2);
 };
 function bindFnOpts(fn) {
-  if (fn === 'review') {
-    $('#addDocsBtn')?.addEventListener('click', () => $('#multiInput').click());
-    $('#recSearchBtn')?.addEventListener('click', () => loadRecords());
-  }
   if (fn === 'records') {
     $('#recSearchBtn')?.addEventListener('click', () => loadRecords());
     $('#recSearch')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadRecords(); });
@@ -302,10 +269,7 @@ $('#sampleBtn').addEventListener('click', () => {
   const s = FNS[currentFn].sample;
   if (s) { pushHistory(); $('#editor').value = s; $('#charCount').textContent = s.length + ' 字'; }
 });
-$('#importBtn').addEventListener('click', () => {
-  if (currentFn === 'review') $('#multiInput').click();
-  else $('#fileInput').click();
-});
+$('#importBtn').addEventListener('click', () => $('#fileInput').click());
 async function readFiles(files) {
   const out = [];
   for (const f of files) {
@@ -328,26 +292,6 @@ $('#fileInput').addEventListener('change', async (e) => {
   } catch (err) { setResult('❌ ' + err.message, true); }
   e.target.value = '';
 });
-$('#multiInput').addEventListener('change', async (e) => {
-  const files = [...e.target.files]; if (!files.length) return;
-  try {
-    if (reviewDocs.length + files.length > 6) throw new Error('每批最多6篇文献，请先移除部分文献');
-    const list = await readFiles(files);
-    list.forEach((d) => reviewDocs.push({ name: d.filename, text: d.text }));
-    renderDocs();
-    setResult(`✅ 已添加 ${list.length} 篇文献（当前共 ${reviewDocs.length}/6 篇），点击「开始处理」生成参考版综述。`);
-  } catch (err) { setResult('❌ ' + err.message, true); }
-  e.target.value = '';
-});
-function renderDocs() {
-  $('#docList').innerHTML = reviewDocs.map((d, i) =>
-    `<span class="doc-chip">📄 ${escapeHtml(d.name.slice(0, 18))}<span class="x" data-i="${i}">✕</span></span>`).join('');
-  document.querySelectorAll('#docList .x').forEach((x) => x.addEventListener('click', () => {
-    reviewDocs.splice(Number(x.dataset.i), 1); renderDocs();
-  }));
-  const n = $('#docsNote');
-  if (n) n.textContent = `已添加 ${reviewDocs.length} / 6 篇`;
-}
 
 // ============================================================
 // 结果区
@@ -379,7 +323,7 @@ function showProgress(show, text, pct) {
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 const escapeHtml = esc;
 
-// ---------- 通用流式（互译/四要素/综述） ----------
+// ---------- 通用流式（互译） ----------
 async function runStream(path, text, extraParams) {
   const startFn = currentFn;
   const headers = { Authorization: `Bearer ${api.token}`, 'Content-Type': 'application/json' };
@@ -745,10 +689,10 @@ function renderReport(d) {
 $('#runBtn').addEventListener('click', () => {
   if (currentFn === 'records') { loadRecords(); return; }
   const text = $('#editor').value;
-  if (!text.trim() && !reviewDocs.length && !(currentFn === 'review')) { setResult('⚠️ 请先粘贴或导入文本', true); return; }
+  if (!text.trim()) { setResult('⚠️ 请先粘贴或导入文本', true); return; }
   if (!api.token) { showModal('login'); return; }
   // B3（v0.5）：AI 功能首次使用前披露"输入将发送至 DeepSeek"
-  if (['translate', 'analyze', 'review', 'proofread'].includes(currentFn)) ensureAiDisclosure(() => doRun(text));
+  if (['translate', 'proofread'].includes(currentFn)) ensureAiDisclosure(() => doRun(text));
   else doRun(text);
 });
 async function doRun(text) {

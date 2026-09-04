@@ -27,12 +27,6 @@
       <div class="nav-group">
         <div class="nav-title">🌐 文献工具</div>
         <button class="nav-item" data-fn="translate">🌏 中英互译<span class="tag">M4</span></button>
-        <!-- 收敛（v0.5）：M6/M7 收至二级入口，降低首屏学习成本 -->
-        <details class="nav-more">
-          <summary>🧰 更多工具</summary>
-          <button class="nav-item" data-fn="analyze">🔬 四要素分析</button>
-          <button class="nav-item" data-fn="review">📚 参考版综述</button>
-        </details>
       </div>
       <div class="nav-group">
         <div class="nav-title">🧾 交稿核查</div>
@@ -188,7 +182,7 @@
       </div>
     </div>
 
-    <!-- 工具类工作区（互译/校对/四要素/综述/引用核查/交稿检查/记录） -->
+    <!-- 工具类工作区（互译/校对/引用核查/交稿检查/记录） -->
     <div class="workspace" id="workspace">
       <!-- 编辑器 -->
       <section class="panel editor-panel">
@@ -197,11 +191,9 @@
           <span class="meta" id="charCount">0 字</span>
         </div>
         <textarea id="editor" placeholder="在此粘贴论文草稿 / 文献段落 / 待翻译内容……&#10;&#10;支持直接粘贴、文件导入（.txt / .docx / .pdf 文本层）"></textarea>
-        <div id="docList" class="doclist hidden"></div>
         <div class="toolbar">
           <button id="importBtn" class="btn ghost">📂 导入文件</button>
           <input type="file" id="fileInput" accept=".txt,.md,.docx,.pdf" hidden>
-          <input type="file" id="multiInput" accept=".txt,.md,.docx,.pdf" multiple hidden>
           <button id="sampleBtn" class="btn ghost">✨ 示例</button>
           <button id="clearBtn" class="btn ghost">🗑 清空</button>
           <button id="undoBtn" class="btn ghost" title="撤销最近一次编辑/替换（保留7次）">↩️ 撤销</button>
@@ -335,6 +327,6 @@
 
 <script src="vendor/docx.iife.js?v=1"></script>
 <script src="dingao-local.js?v=1"></script>
-<script src="app.js?v=14"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>

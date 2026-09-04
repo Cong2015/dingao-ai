@@ -66,9 +66,6 @@ function parseEvents(sseText) {
   }
   return evts;
 }
-function deltas(sseText) {
-  return parseEvents(sseText).filter((e) => e.delta).map((e) => e.delta).join('');
-}
 
 // ===== 用例组1：认证与安全 =====
 console.log('[测试] 组1 认证与安全…');
@@ -107,14 +104,9 @@ const t = '摘要：本文研究商业TOD项目的多方协同管理。方法：
 let a1 = await aiStream('/api/ai/translate', { text: t, params: { lang: 'en2zh', model: 'deepseek-v4-flash', temperature: 0.3 } }, token);
 check('TC-13 互译流式成功', a1.status === 200 && a1.text.includes('data:') && a1.text.includes('[DONE]'));
 check('TC-14 互译输出非空', (a1.text.match(/"delta":"[^"]+"/g) || []).length > 0);
-let a2 = await aiStream('/api/ai/analyze', { text: t, params: {} }, token);
-const a2t = deltas(a2.text);
-check('TC-15 四要素分析含四个小节', a2.status === 200 && ['研究方法', '核心结论', '局限与不足', '可切入的研究方向'].every((k) => a2t.includes(k)));
 let a3 = await aiStream('/api/ai/proofread', { text: '这是一个测试 文本,,有全角,半角问题。', params: {} }, token);
 const a3ev = parseEvents(a3.text);
 check('TC-16 校对(分段协议)流式成功', a3.status === 200 && a3ev.some((e) => e.event === 'chunk_done' && e.ok) && a3.text.includes('[DONE]'));
-let a4 = await aiStream('/api/ai/review', { text: '[1] 文献A：关于TOD协同。\n[2] 文献B：关于利益分配。', params: {} }, token);
-check('TC-17 综述流式成功', a4.status === 200 && a4.text.includes('[DONE]'));
 let bad = await aiStream('/api/ai/unknown', { text: t, params: {} }, token);
 check('TC-18 未知任务被拒(400)', bad.status === 400);
 
