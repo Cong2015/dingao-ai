@@ -1,4 +1,4 @@
-// 定稿AI 开发版 v0.4 — 后端服务（本地优先架构）
+// 定稿AI 开发版 v0.5 — 后端服务（本地优先架构）
 // 范围（对应 R8 DoD V1.3 Must 清单；V1.4 架构修订）：
 //   PBI-21 M9 选题助手 / PBI-22 M10 大纲生成（纯中转：AI JSON，服务端不存会话与内容）
 //   PBI-23 M11 本地编写 / PBI-24 M12 进度打卡（V1.4起全部在用户浏览器 IndexedDB 本地实现，服务端无存储）
@@ -87,16 +87,30 @@ CREATE TABLE IF NOT EXISTS records(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, type TEXT NOT NULL,
   title TEXT NOT NULL, input_len INTEGER NOT NULL, output TEXT NOT NULL,
   created_at TEXT DEFAULT (datetime('now','localtime')));
+CREATE TABLE IF NOT EXISTS ai_logs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, task TEXT NOT NULL,
+  model TEXT NOT NULL, status TEXT NOT NULL, duration_ms INTEGER NOT NULL, input_len INTEGER NOT NULL,
+  created_at TEXT DEFAULT (datetime('now','localtime')));
+CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_logs(created_at);
+CREATE TABLE IF NOT EXISTS feedback(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, type TEXT NOT NULL, contact TEXT NOT NULL,
+  content TEXT NOT NULL, status TEXT DEFAULT 'open',
+  created_at TEXT DEFAULT (datetime('now','localtime')));
 `);
 // v0.4 本地优先架构：论文全文/大纲/进度/打卡全部存用户浏览器 IndexedDB（见 public/dingao-local.js），
 // 服务端数据库只保留：用户账号、会话、用户API密钥、用户主动保存的工具结果记录（records）。
 // 原 v0.3 的 theses/chapters/checkins/topic_sessions/topic_messages 五表已随架构调整移除。
 const userCols = db.prepare(`PRAGMA table_info(users)`).all().map((c) => c.name);
 if (!userCols.includes('is_admin')) db.exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0`);
+if (!userCols.includes('agreed_at')) db.exec(`ALTER TABLE users ADD COLUMN agreed_at TEXT`);   // v0.5：协议同意时间（B1 告知同意）
 
 // ---------- 工具 ----------
 const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 64).toString('hex');
 const now = () => Date.now();
+// D5-2 可观测性埋点（v0.5）：AI 调用元数据日志（不含内容文本，隐私安全）；留存 ≥6 个月（C5 合规口径，见隐私政策）
+function logAi(userId, task, model, status, durationMs, inputLen) {
+  try { db.prepare('INSERT INTO ai_logs(user_id, task, model, status, duration_ms, input_len) VALUES(?,?,?,?,?,?)').run(userId, String(task).slice(0, 20), String(model || '').slice(0, 30), String(status).slice(0, 10), Number(durationMs) || 0, Number(inputLen) || 0); } catch {}
+}
 function uid(token) { const r = db.prepare('SELECT user_id, expires FROM sessions WHERE token=?').get(token); if (!r || r.expires < now()) return null; return r.user_id; }
 function requireAuth(req, res) { const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, ''); const id = t && uid(t); if (!id) { res.status(401).json({ error: '未登录或登录已过期' }); return null; } return id; }
 const ok = (res, data) => res.json(data);
@@ -113,6 +127,19 @@ function rateLimit(req, res, next) {
   win.n++;
   rl.set(key, win);
   if (win.n > 60) return res.status(429).json({ error: '请求过于频繁，请稍后再试（每小时60次）' });
+  next();
+}
+// 登录失败锁定（FIND-02修复）：同「用户名+IP」连续5次失败锁15分钟；内存窗口，重启即清
+const loginLock = new Map();
+// 工具端点独立限流（FIND-05修复）：匿名 IP 每 5 分钟 60 次（纯内存解析零落盘，防滥用且不占用 AI 配额）
+const toolRl = new Map();
+function toolRateLimit(req, res, next) {
+  const key = req.ip;
+  const win = toolRl.get(key) || { n: 0, t: now() };
+  if (now() - win.t > 5 * 60e3) { win.n = 0; win.t = now(); }
+  win.n++;
+  toolRl.set(key, win);
+  if (win.n > 60) return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
   next();
 }
 
@@ -175,6 +202,7 @@ function splitLongPara(s, maxLen) {
         if (cut < maxLen * 0.5) cut = rest.lastIndexOf(' ', maxLen);
         if (cut < maxLen * 0.5) cut = Math.max(rest.indexOf(' ', maxLen * 0.6), maxLen);
         if (cut <= 0) cut = maxLen;
+        cut = Math.min(cut, maxLen - 1);   // BUG-001修复：兜底切割不越界（原 slice(0, maxLen+1) 产出 2501 字块）
         out.push(rest.slice(0, cut + 1));
         rest = rest.slice(cut + 1);
       }
@@ -199,7 +227,7 @@ function chunkText(text, maxLen = 2500) {
     } else cur += tok;
   }
   if (cur) chunks.push(cur);
-  return chunks.length ? chunks : [''];
+  return chunks;   // FIND-08修复：空输入返回 []（原 [''] 语义与调用方不符）
 }
 
 // ---------- DeepSeek 调用（非流式单次获取；检测截断与空输出） ----------
@@ -263,6 +291,11 @@ function citeCheck(text, fmt = 'gbt7714') {
   const orphanInText = inSet.filter((n) => !refSet.includes(n));
   const orphanRefs = refSet.filter((n) => !inSet.includes(n));
   const dupInText = intext.length - inSet.length;
+
+  // FIND-09新增：文末文献序号跳号检测（顺序编码制要求连续编号）
+  const maxRef = refSet.length ? Math.max(...refSet) : 0;
+  const missingRefs = [];
+  for (let n = 1; n <= maxRef; n++) if (!refSet.includes(n)) missingRefs.push(n);
   const authorYear = (body.match(/[（(][\u4e00-\u9fa5A-Za-z]+[，,]\s*\d{4}[a-z]?[)）]/g) || []).length;
 
   // 序号错位：首次出现顺序应为递增（顺序编码制）
@@ -318,6 +351,7 @@ function citeCheck(text, fmt = 'gbt7714') {
   const issues = [];
   if (orphanInText.length) issues.push(`文内引用序号 ${orphanInText.join('、')} 在文末参考文献中缺失（漏引/序号错位风险）`);
   if (orphanRefs.length) issues.push(`文末文献 ${orphanRefs.join('、')} 未被正文引用（多余文献）`);
+  if (missingRefs.length) issues.push(`文末文献序号跳号：缺少 [${missingRefs.slice(0, 12).join('、')}]${missingRefs.length > 12 ? ' 等' : ''}（若为删除文献遗留，请重排序号）`);
   if (dupInText > 0) issues.push(`文内重复引用 ${dupInText} 处（请核对序号对应）`);
   if (seqErrors.length) issues.push(`序号错位：引用 ${[...new Set(seqErrors)].join('、')} 的首次出现早于更小序号，建议一键重排（见下方修正建议）`);
   if (fmt === 'gbt7714' && authorYear > 0) issues.push(`检测到 ${authorYear} 处著者-出版年体例引用，请确认与顺序编码制不混用`);
@@ -328,7 +362,7 @@ function citeCheck(text, fmt = 'gbt7714') {
     intextCount: intext.length, refCount: refs.length,
     intextIndices: inSet, refIndices: refSet,
     orphanInText, orphanRefs, authorYearCount: authorYear,
-    seqErrors: [...new Set(seqErrors)], dupGroups, suspected,
+    missingRefs, seqErrors: [...new Set(seqErrors)], dupGroups, suspected,
     renumber: renumberApplied ? { mapping, renumberedBody, renumberedRefs } : null,
     issues: issues.length ? issues : [`未发现明显引用问题；体例检查：${fmt === 'gbt7714' ? 'GB/T 7714 顺序编码制' : fmt === 'apa' ? 'APA 7th' : fmt === 'mla' ? 'MLA 9th' : 'GB/T 7714 著者-出版年制'} ✓`],
     fmt,
@@ -409,9 +443,18 @@ function formatCheck(meta) {
 const app = express();
 app.disable('x-powered-by');
 app.use((req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); next(); });
-// CORS：允许 GitHub Pages 静态前端跨域调用本服务（本地/局域网同源不受影响；Bearer 头模式无需凭证）
+// CORS：Origin 白名单（FIND-03修复——不再通配 *）：github.io 静态前端 / cpolar 隧道 / 本机与局域网
+// 白名单外 Origin 不回 ACAO 头，浏览器默认拦截响应（无凭证 Bearer 模式不受影响）
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (origin) {
+    let host = '';
+    try { host = new URL(origin).hostname; } catch {}
+    const allowed = /(^|\.)github\.io$/i.test(host) || /(^|\.)cpolar\.(top|cn)$/i.test(host)
+      || host === 'localhost' || host === '127.0.0.1' || host === '::1' || /^\[::1\]$/.test(host)
+      || /^192\.168\./.test(host) || /^10\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    if (allowed) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Filename');
   res.setHeader('Access-Control-Max-Age', '86400');
@@ -423,21 +466,30 @@ app.use(express.static(path.join(__dirname, 'public'), { setHeaders: (res) => { 
 
 // 认证
 app.post('/api/auth/register', (req, res) => {
-  const { username, password } = req.body || {};
+  const { username, password, agree } = req.body || {};
   if (!/^[\w\u4e00-\u9fa5]{2,20}$/.test(username || '')) return res.status(400).json({ error: '用户名需2-20位（中英文/数字/下划线）' });
   if (!password || password.length < 6) return res.status(400).json({ error: '密码至少6位' });
+  if (!agree) return res.status(400).json({ error: '请先阅读并同意《用户协议》《隐私政策》《学术诚信使用规范》（B1 告知同意）' });
   const salt = crypto.randomBytes(16).toString('hex');
   const isFirst = db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0;
-  try { db.prepare('INSERT INTO users(username, pass_hash, salt, is_admin) VALUES(?,?,?,?)').run(username, hashPw(password, salt), salt, isFirst ? 1 : 0); }
+  try { db.prepare(`INSERT INTO users(username, pass_hash, salt, is_admin, agreed_at) VALUES(?,?,?,?,datetime('now','localtime'))`).run(username, hashPw(password, salt), salt, isFirst ? 1 : 0); }
   catch { return res.status(409).json({ error: '用户名已存在' }); }
   ok(res, { message: isFirst ? '注册成功（首个账号自动成为管理员，可使用平台Key）' : '注册成功，请登录' });
 });
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body || {};
-  const u = db.prepare('SELECT * FROM users WHERE username=?').get(username || '');
-  if (!u) return res.status(401).json({ error: '用户名或密码错误' });
+  const name = String(username || '').trim();
+  // FIND-02修复：同「用户名+IP」连续5次失败锁15分钟（内存窗口，重启即清）
+  const lkKey = name + '|' + req.ip;
+  const lk = loginLock.get(lkKey) || { n: 0, t: now() };
+  if (now() - lk.t > 15 * 60e3) { lk.n = 0; lk.t = now(); }
+  if (lk.n >= 5) return res.status(429).json({ error: '失败次数过多，请 15 分钟后再试' });
+  const u = db.prepare('SELECT * FROM users WHERE username=?').get(name);
+  const fail = () => { lk.n++; loginLock.set(lkKey, lk); return res.status(401).json({ error: '用户名或密码错误' }); };
+  if (!u) return fail();
   const h = hashPw(password || '', u.salt);
-  if (!crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(u.pass_hash, 'hex'))) return res.status(401).json({ error: '用户名或密码错误' });
+  if (!crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(u.pass_hash, 'hex'))) return fail();
+  loginLock.delete(lkKey);
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO sessions(token, user_id, expires) VALUES(?,?,?)').run(token, u.id, now() + 30 * 86400e3);
   ok(res, { token, username: u.username });
@@ -449,9 +501,30 @@ app.post('/api/auth/logout', (req, res) => {
 });
 app.get('/api/auth/me', (req, res) => {
   const id = requireAuth(req, res); if (!id) return;
-  const u = db.prepare('SELECT id, username, is_admin, created_at FROM users WHERE id=?').get(id);
+  const u = db.prepare('SELECT id, username, is_admin, created_at, agreed_at FROM users WHERE id=?').get(id);
   const k = db.prepare('SELECT masked, verified FROM api_keys WHERE user_id=?').get(id);
-  ok(res, { ...u, isAdmin: u.is_admin === 1 || ADMIN_LIST.includes(u.username), hasKey: !!k, keyMasked: k ? k.masked : '', keyVerified: k ? k.verified === 1 : false, platformKeyPublic: PLATFORM_KEY_PUBLIC });
+  ok(res, { ...u, agreed: !!u.agreed_at, isAdmin: u.is_admin === 1 || ADMIN_LIST.includes(u.username), hasKey: !!k, keyMasked: k ? k.masked : '', keyVerified: k ? k.verified === 1 : false, platformKeyPublic: PLATFORM_KEY_PUBLIC });
+});
+// 存量用户补签协议（v0.5 B1：未同意过的新老用户登录后须勾选同意方可使用）
+app.post('/api/consent', (req, res) => {
+  const id = requireAuth(req, res); if (!id) return;
+  db.prepare(`UPDATE users SET agreed_at=datetime('now','localtime') WHERE id=?`).run(id);
+  ok(res, { message: '已记录同意（时间戳留存）' });
+});
+// 账号注销（PIPL 第四十七条）：删除账号/会话/密钥/记录；调用日志匿名化（留存≥6个月合规要求）
+app.post('/api/auth/delete-account', (req, res) => {
+  const id = requireAuth(req, res); if (!id) return;
+  const { password } = req.body || {};
+  const u = db.prepare('SELECT * FROM users WHERE id=?').get(id);
+  if (!u) return res.status(404).json({ error: '账号不存在' });
+  const h = hashPw(password || '', u.salt);
+  if (!crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(u.pass_hash, 'hex'))) return res.status(401).json({ error: '密码不正确，注销已取消' });
+  db.prepare('DELETE FROM api_keys WHERE user_id=?').run(id);
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
+  db.prepare('DELETE FROM records WHERE user_id=?').run(id);
+  db.prepare('DELETE FROM users WHERE id=?').run(id);
+  db.prepare('UPDATE ai_logs SET user_id=0 WHERE user_id=?').run(id);
+  ok(res, { message: '账号已注销：服务端账号/密钥/记录已删除，调用日志已匿名化。浏览器本地数据（论文/大纲/打卡）未上传过、请自行清理或先导出备份' });
 });
 
 // ---------- AI 分段校对（M5：智能分段·逐块·SSE进度·截断自动细分·单块失败不阻塞） ----------
@@ -496,16 +569,19 @@ app.post('/api/ai/proofread', rateLimit, async (req, res) => {
   const rk = resolveKeyFor(id);
   if (!rk) return res.status(403).json({ error: 'AI功能需要API Key：请先在「我的Key」配置你自己的DeepSeek密钥并完成本地核对' });
   const p = params || {};
+  const t0 = now();
   const maxChunk = Math.min(Math.max(Number(p.maxChunk) || 2500, 800), 3000);
   const chunks = chunkText(String(text), maxChunk);
   sse(res);
   sendEvent(res, { event: 'start', chunks: chunks.length, totalChars: String(text).length, maxChunk });
+  let anyErr = false;
   for (let i = 0; i < chunks.length; i++) {
     sendEvent(res, { event: 'progress', index: i, done: i, total: chunks.length });
     const r = await proofreadChunkOnce(chunks[i], p, rk.key, 0);
     if (r.ok) sendEvent(res, { event: 'chunk_done', index: i, ok: true, truncated: !!r.truncated, content: r.content });
-    else sendEvent(res, { event: 'chunk_error', index: i, ok: false, message: r.error });
+    else { anyErr = true; sendEvent(res, { event: 'chunk_error', index: i, ok: false, message: r.error }); }
   }
+  logAi(id, 'proofread', p.model, anyErr ? 'error' : 'ok', now() - t0, String(text).length);
   sendEvent(res, { event: 'end' });
   res.write('data: [DONE]\n\n');
   res.end();
@@ -536,18 +612,35 @@ app.post('/api/ai/:task', rateLimit, async (req, res) => {
   const rk = resolveKeyFor(id);
   if (!rk) return res.status(403).json({ error: 'AI功能需要API Key：请先在「我的Key」配置你自己的DeepSeek密钥并完成本地核对（平台Key暂仅管理员可用，付费功能上线后开放借用）' });
   sse(res);
-  const r = await dsCall(task, String(text), params || {}, rk.key);
-  if (!r.ok) { sendEvent(res, { event: 'error', message: r.error }); res.end(); return; }
-  let content = r.content;
-  let truncatedNote = '';
-  if (r.finishReason === 'length') truncatedNote = '\n\n⚠️ 输出达到长度上限被截断，请缩短输入或分段处理后重试。';
-  sendEvent(res, { event: 'meta', model: r.model, finishReason: r.finishReason });
+  const t0 = now();
+  const fullText = String(text);
+  let content = ''; let model = ''; let chunksUsed = 0;
+  const fail = (msg) => { logAi(id, task, (params || {}).model || model, 'error', now() - t0, fullText.length); sendEvent(res, { event: 'error', message: msg }); res.end(); };
+  if (fullText.length > 3000) {
+    // v0.5 长输入预切块：>3000 字自动分段逐块调用后拼接（规避整单超时，评审异常维度采纳项）
+    const chunks = chunkText(fullText, 2500);
+    sendEvent(res, { event: 'chunked', chunks: chunks.length });
+    for (let i = 0; i < chunks.length; i++) {
+      sendEvent(res, { event: 'progress', index: i, done: i, total: chunks.length });
+      const rr = await dsCall(task, chunks[i], params || {}, rk.key);
+      if (!rr.ok) return fail(`第 ${i + 1}/${chunks.length} 块失败：${rr.error}`);
+      content += (content ? '\n\n' : '') + rr.content;
+      model = rr.model;
+      chunksUsed = chunks.length;
+    }
+  } else {
+    const r = await dsCall(task, fullText, params || {}, rk.key);
+    if (!r.ok) return fail(r.error);
+    content = r.content; model = r.model;
+    if (r.finishReason === 'length') content += '\n\n⚠️ 输出达到长度上限被截断，请缩短输入或分段处理后重试。';
+  }
+  logAi(id, task, (params || {}).model || model, 'ok', now() - t0, fullText.length);
+  sendEvent(res, { event: 'meta', model, finishReason: 'stop', chunks: chunksUsed });
   const CH = 120;
   let i = 0;
   const timer = setInterval(() => {
     if (i >= content.length) {
       clearInterval(timer);
-      if (truncatedNote) res.write(`data: ${JSON.stringify({ delta: truncatedNote })}\n\n`);
       res.write('data: [DONE]\n\n'); res.end(); return;
     }
     const piece = content.slice(i, i + CH);
@@ -558,7 +651,7 @@ app.post('/api/ai/:task', rateLimit, async (req, res) => {
 });
 
 // 引用核查（M2 规则引擎增强版）
-app.post('/api/citecheck', (req, res) => {
+app.post('/api/citecheck', toolRateLimit, (req, res) => {
   const { text, fmt } = req.body || {};
   const t = String(text || '');
   if (!t) return res.status(400).json({ error: '文本为空' });
@@ -567,7 +660,7 @@ app.post('/api/citecheck', (req, res) => {
 });
 
 // 交稿检查报告（M8：引用核查＋docx基础格式检查·只检不改·确定性）
-app.post('/api/checkreport', (req, res) => {
+app.post('/api/checkreport', toolRateLimit, (req, res) => {
   const { text, fmt, meta } = req.body || {};
   const t = String(text || '');
   if (!t) return res.status(400).json({ error: '文本为空' });
@@ -601,8 +694,10 @@ app.post('/api/records', (req, res) => {
   const id = requireAuth(req, res); if (!id) return;
   const { type, title, inputLen, output } = req.body || {};
   if (!type || !output) return res.status(400).json({ error: '参数不完整' });
+  // FIND-07修复：清洗 NUL 及控制字符（SQLite TEXT 绑定在 NUL 处截断，会导致内容静默丢失）
+  const clean = (s) => String(s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
   const r = db.prepare('INSERT INTO records(user_id, type, title, input_len, output) VALUES(?,?,?,?,?)')
-    .run(id, String(type).slice(0, 20), String(title || '未命名').slice(0, 80), Number(inputLen) || 0, String(output).slice(0, 200000));
+    .run(id, clean(type).slice(0, 20), clean(title || '未命名').slice(0, 80), Number(inputLen) || 0, clean(output).slice(0, 200000));
   ok(res, { id: Number(r.lastInsertRowid), message: '已保存（原文不落库，仅保存结果）' });
 });
 app.get('/api/records', (req, res) => {
@@ -621,12 +716,15 @@ app.get('/api/records/:rid', (req, res) => {
 });
 app.delete('/api/records/:rid', (req, res) => {
   const id = requireAuth(req, res); if (!id) return;
-  db.prepare('DELETE FROM records WHERE id=? AND user_id=?').run(Number(req.params.rid), id);
+  // FIND-04修复：他人/不存在记录无命中→404（原0行删除仍返回200「已删除」语义误导）
+  const r = db.prepare('SELECT id FROM records WHERE id=? AND user_id=?').get(Number(req.params.rid), id);
+  if (!r) return res.status(404).json({ error: '记录不存在' });
+  db.prepare('DELETE FROM records WHERE id=?').run(Number(req.params.rid));
   ok(res, { message: '已删除' });
 });
 
 // 文件导入（.txt / .docx 含格式元数据 / .pdf 文本层）
-app.post('/api/import', express.raw({ type: () => true, limit: '15mb' }), async (req, res) => {
+app.post('/api/import', toolRateLimit, express.raw({ type: () => true, limit: '15mb' }), async (req, res) => {
   const name = String(req.headers['x-filename'] || '');
   const ext = path.extname(name).toLowerCase();
   try {
@@ -645,11 +743,11 @@ app.post('/api/import', express.raw({ type: () => true, limit: '15mb' }), async 
     } else return res.status(400).json({ error: '支持格式：.txt / .docx / .pdf' });
     text = text.slice(0, 100000);
     ok(res, { filename: name, text, chars: text.length, meta });
-  } catch (e) { res.status(500).json({ error: `导入失败：${e.message}` }); }
+  } catch (e) { res.status(400).json({ error: `导入失败：${e.message}` }); }   // FIND-06修复：文件解析失败属用户输入问题→400（原500）
 });
 
 // 导出（.txt / .docx）
-app.post('/api/export', async (req, res) => {
+app.post('/api/export', toolRateLimit, async (req, res) => {
   const { title, sections, fmt } = req.body || {};
   const secs = Array.isArray(sections) ? sections : [];
   if (!secs.length) return res.status(400).json({ error: '无内容可导出' });
@@ -700,8 +798,9 @@ app.post('/api/topics/suggest', rateLimit, async (req, res) => {
   const rk = resolveKeyFor(id);
   if (!rk) return res.status(403).json({ error: 'AI功能需要API Key：请先在「我的Key」配置你自己的DeepSeek密钥并完成本地核对' });
   const count = Math.min(Math.max(Number(form.count) || 5, 3), 5);
+  const t0 = now();
   const r = await dsCallRetry('topic', problem, { form: { ...form, count }, responseFormat: true, timeoutMs: 180000 }, rk.key);
-  if (!r.ok) return res.status(502).json({ error: r.error });
+  if (!r.ok) { logAi(id, 'topic', '', 'error', now() - t0, problem.length); return res.status(502).json({ error: r.error }); }
   const parsed = parseAiJson(r.content);
   if (!parsed.ok || !Array.isArray(parsed.data.topics) || !parsed.data.topics.length) {
     return res.status(502).json({ error: 'AI未按约定格式返回选题（JSON解析失败），请重试或调整问题描述' });
@@ -715,6 +814,7 @@ app.post('/api/topics/suggest', rateLimit, async (req, res) => {
       if (p2.ok && Array.isArray(p2.data.topics) && p2.data.topics.length) topics = p2.data.topics.slice(0, 5).map((t, i) => ({ index: t.index ?? i + 1, ...t }));
     }
   }
+  logAi(id, 'topic', r.model, 'ok', now() - t0, problem.length);
   ok(res, { topics, model: r.model, aiNote: '选题由AI生成，需人工核验；输入仅内存中转，服务端不存储' });
 });
 // 追问迭代（纯中转：前端携带会话历史，服务端不存会话）
@@ -729,8 +829,9 @@ app.post('/api/topics/iterate', rateLimit, async (req, res) => {
   const hist = Array.isArray(history)
     ? history.map((m) => `${m.role === 'user' ? '用户' : 'AI'}：${String(m.content || '').slice(0, 1500)}`).join('\n')
     : String(history || '').slice(0, 8000);
+  const t0 = now();
   const r = await dsCallRetry('topic', hist + '\n用户追问：' + q, { form: {}, responseFormat: true, timeoutMs: 180000, systemOverride: PROMPTS.topic.systemIter }, rk.key);
-  if (!r.ok) return res.status(502).json({ error: r.error });
+  if (!r.ok) { logAi(id, 'topic_iter', '', 'error', now() - t0, q.length); return res.status(502).json({ error: r.error }); }
   const parsed = parseAiJson(r.content);
   if (!parsed.ok || !Array.isArray(parsed.data.topics) || !parsed.data.topics.length) {
     return res.status(502).json({ error: 'AI未按约定格式返回选题（JSON解析失败），请重试' });
@@ -743,6 +844,7 @@ app.post('/api/topics/iterate', rateLimit, async (req, res) => {
       if (p2.ok && Array.isArray(p2.data.topics) && p2.data.topics.length) topics = p2.data.topics.slice(0, 5);
     }
   }
+  logAi(id, 'topic_iter', r.model, 'ok', now() - t0, q.length);
   ok(res, { topics, model: r.model, aiNote: '选题由AI生成，需人工核验；输入仅内存中转，服务端不存储' });
 });
 
@@ -753,14 +855,47 @@ app.post('/api/outline/generate', rateLimit, async (req, res) => {
   if (!title) return res.status(400).json({ error: '请提供选题/论文标题（可先采纳选题）' });
   const rk = resolveKeyFor(id);
   if (!rk) return res.status(403).json({ error: 'AI功能需要API Key：请先在「我的Key」配置你自己的DeepSeek密钥并完成本地核对' });
+  const t0 = now();
   const r = await dsCallRetry('outline', title, { title, extra: String((req.body || {}).extra || '').slice(0, 2000), responseFormat: true, timeoutMs: 180000 }, rk.key);
-  if (!r.ok) return res.status(502).json({ error: r.error });
+  if (!r.ok) { logAi(id, 'outline', '', 'error', now() - t0, title.length); return res.status(502).json({ error: r.error }); }
   const parsed = parseAiJson(r.content);
   if (!parsed.ok || !Array.isArray(parsed.data.chapters) || !parsed.data.chapters.length) {
+    logAi(id, 'outline', r.model, 'error', now() - t0, title.length);
     return res.status(502).json({ error: 'AI未按约定格式返回大纲（JSON解析失败），请重试', raw: r.content.slice(0, 500) });
   }
+  logAi(id, 'outline', r.model, 'ok', now() - t0, title.length);
   ok(res, { chapters: parsed.data.chapters.slice(0, 12), model: r.model, aiNote: '大纲由AI生成，需人工核验；应用后可在「大纲」页继续编辑' });
 });
+// ---------- 投诉与举报（生成式AI办法第十五条：便捷入口+15日处理承诺） ----------
+app.post('/api/feedback', toolRateLimit, (req, res) => {
+  const { type, content, contact } = req.body || {};
+  const c = String(content || '').trim();
+  if (!c) return res.status(400).json({ error: '请填写反馈内容' });
+  if (c.length > 2000) return res.status(400).json({ error: '内容过长（≤2000字）' });
+  const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const userId = t ? uid(t) : null;
+  const types = { content: '内容投诉', bug: '功能问题', illegal: '举报违法内容', other: '其他' };
+  db.prepare('INSERT INTO feedback(user_id, type, contact, content) VALUES(?,?,?,?)').run(userId || 0, types[String(type)] || String(type || '其他').slice(0, 10), String(contact || '').slice(0, 100), c);
+  ok(res, { message: '已收到您的反馈，我们将在 15 日内处理并反馈' });
+});
+app.get('/api/admin/feedback', (req, res) => {
+  const id = requireAuth(req, res); if (!id) return;
+  const u = db.prepare('SELECT username, is_admin FROM users WHERE id=?').get(id);
+  if (!u || !(u.is_admin === 1 || ADMIN_LIST.includes(u.username))) return res.status(403).json({ error: '仅管理员可用' });
+  ok(res, db.prepare('SELECT * FROM feedback ORDER BY id DESC LIMIT 200').all());
+});
+
+// ---------- 管理员统计看板（D5-2 可观测性：聚合指标，不含任何内容文本） ----------
+app.get('/api/admin/stats', (req, res) => {
+  const id = requireAuth(req, res); if (!id) return;
+  const u = db.prepare('SELECT username, is_admin FROM users WHERE id=?').get(id);
+  if (!u || !(u.is_admin === 1 || ADMIN_LIST.includes(u.username))) return res.status(403).json({ error: '仅管理员可用' });
+  const total = db.prepare("SELECT COUNT(*) AS n, SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok, SUM(duration_ms) AS ms FROM ai_logs").get();
+  const byTask = db.prepare("SELECT task, model, COUNT(*) AS n, SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok, ROUND(AVG(duration_ms)) AS avg_ms FROM ai_logs GROUP BY task, model ORDER BY n DESC").all();
+  const byDay = db.prepare("SELECT substr(created_at,1,10) AS day, COUNT(*) AS n, SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END) AS ok FROM ai_logs GROUP BY day ORDER BY day DESC LIMIT 30").all();
+  ok(res, { totalCalls: total.n || 0, okCalls: total.ok || 0, avgMs: total.n ? Math.round((total.ms || 0) / total.n) : 0, byTask, byDay, note: '仅元数据统计，不含任何内容文本；日志留存≥6个月（见隐私政策）' });
+});
+
 // 健康与能力清单
 function lanUrls() {
   const out = [];
@@ -771,13 +906,13 @@ function lanUrls() {
   }
   return [...new Set(out)];
 }
-app.get('/api/health', (req, res) => ok(res, { status: 'ok', version: '0.4', models: MODELS, hasKey: !!API_KEY, lanUrls: lanUrls(), local: `http://localhost:${PORT}`, privacy: '论文数据仅存用户浏览器本地，服务端不存储论文内容', time: new Date().toISOString() }));
+app.get('/api/health', (req, res) => ok(res, { status: 'ok', version: '0.5', models: MODELS, hasKey: !!API_KEY, lanUrls: lanUrls(), local: `http://localhost:${PORT}`, privacy: '论文数据仅存用户浏览器本地，服务端不存储论文内容', time: new Date().toISOString() }));
 
 app.listen(PORT, '::', () => {
-  console.log(`[定稿AI v0.4] 服务已启动 http://[::]:${PORT}（IPv4/IPv6 双栈，cpolar 走 [::1] 亦可达）`);
-  for (const u of lanUrls()) console.log(`[定稿AI v0.4] 本机访问 ${u} （其他电脑请用此地址，需防火墙放行 TCP ${PORT}）`);
-  console.log(`[定稿AI v0.4] DeepSeek密钥：${API_KEY ? '已加载' : '未配置（功能将返回503）'} · 数据库：${DB_PATH}（仅账号/密钥/记录，无论文数据）`);
-  if (IS_TEST) console.log('[定稿AI v0.4] 测试模式');
+  console.log(`[定稿AI v0.5] 服务已启动 http://[::]:${PORT}（IPv4/IPv6 双栈，cpolar 走 [::1] 亦可达）`);
+  for (const u of lanUrls()) console.log(`[定稿AI v0.5] 本机访问 ${u} （其他电脑请用此地址，需防火墙放行 TCP ${PORT}）`);
+  console.log(`[定稿AI v0.5] DeepSeek密钥：${API_KEY ? '已加载' : '未配置（功能将返回503）'} · 数据库：${DB_PATH}（仅账号/密钥/记录，无论文数据）`);
+  if (IS_TEST) console.log('[定稿AI v0.5] 测试模式');
 });
 
 // ---------- 测试钩子：纯函数导出（单元测试 TC-U01~U10 import 用；不影响服务行为） ----------

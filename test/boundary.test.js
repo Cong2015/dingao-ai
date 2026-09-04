@@ -45,8 +45,8 @@ async function req(path_, opt = {}) {
 // 准备账号
 const uname = 'bnd_' + Date.now().toString(36).slice(-5);
 let token = '';
-let r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: uname, password: 'Boundary#1' }) });
-r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uname, password: 'Boundary#1' }) });
+let r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: uname, password: 'Boundary#1', agree: true }) });
+r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uname, password: 'Boundary#1', agree: true }) });
 if (r.status === 200 && r.data) token = r.data.token;
 
 // ---- TC-B01 文本长度上限（citecheck 零AI）----
@@ -66,13 +66,13 @@ r = await req('/api/ai/translate', { method: 'POST', body: JSON.stringify({ text
 check('TC-B02c 互译空文本→400无500', r.status === 400, `status=${r.status}`);
 
 // ---- TC-B03 账号字段边界 ----
-r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: 'x', password: 'abcdef1' }) });
+r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: 'x', password: 'abcdef1', agree: true }) });
 check('TC-B03a 用户名1位→400', r.status === 400, `status=${r.status}`);
-r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: 'a'.repeat(21), password: 'abcdef1' }) });
+r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: 'a'.repeat(21), password: 'abcdef1', agree: true }) });
 check('TC-B03b 用户名21位→400', r.status === 400, `status=${r.status}`);
-r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: 'bad!name', password: 'abcdef1' }) });
+r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: 'bad!name', password: 'abcdef1', agree: true }) });
 check('TC-B03c 用户名特殊字符→400', r.status === 400, `status=${r.status}`);
-r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: 'pw5test', password: '12345' }) });
+r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: 'pw5test', password: '12345', agree: true }) });
 check('TC-B03d 密码5位→400', r.status === 400, `status=${r.status}`);
 
 // ---- TC-B04 请求体体积（先实测413形态）----
@@ -95,15 +95,14 @@ check('TC-B05b 注入串落库无损(参数化)', r.status === 200, `status=${r.
 if (r.status === 200) {
   const rid = r.data.id;
   const r2 = await req(`/api/records/${rid}`, { token });
-  // evil 含 NUL：主断言按实测截断行为——NUL 前部分一致（截断本身由 TC-B05c2 记录为发现项）
-  const expectPrefix = evil.slice(0, evil.indexOf('\u0000'));
-  check('TC-B05c 回读内容与写入一致(NUL前部分)', r2.status === 200 && r2.data.output === expectPrefix, `output=${JSON.stringify(r2.data && r2.data.output)}`);
-  // 发现项：SQLite TEXT 绑定在 \u0000(NUL) 处截断——NUL 及之后内容丢失（数据完整性边界）
+  // FIND-07已修复（v0.5）：服务端入库前清洗 NUL 及控制字符——回读应等于清洗后文本（NUL 剔除而非截断）
+  const expectClean = evil.replace(/\u0000/g, '');
+  check('TC-B05c 回读内容与写入一致(NUL已清洗)', r2.status === 200 && r2.data.output === expectClean, `output=${JSON.stringify(r2.data && r2.data.output)}`);
+  // FIND-07修复验证：'A\u0000B' 落库后应回读 'AB'（清洗而非截断）
   const nulOnly = 'A\u0000B';
   const rn = await req('/api/records', { method: 'POST', body: JSON.stringify({ type: 'nul', title: 'nul', inputLen: 1, output: nulOnly }), token });
   const rnb = rn.status === 200 ? await req(`/api/records/${rn.data.id}`, { token }) : null;
-  if (rnb && rnb.data.output !== nulOnly) findings.push({ name: 'TC-B05c 发现项', detail: 'records.output 含 NUL 时落库截断（回读 ' + JSON.stringify(rnb.data.output) + '，NUL及之后内容丢失）——SQLite TEXT 绑定行为；报产品裁定是否需清洗/拒绝 NUL 输入' });
-  check('TC-B05c2 NUL截断行为如实记录(发现项)', true, '');
+  check('TC-B05c2 NUL清洗落库→回读AB(FIND-07修复)', !!rnb && rnb.data.output === 'AB', `output=${JSON.stringify(rnb && rnb.data.output)}`);
   if (rn.status === 200 && rn.data) await req(`/api/records/${rn.data.id}`, { method: 'DELETE', token });
   await req(`/api/records/${rid}`, { method: 'DELETE', token });
 }
@@ -144,7 +143,7 @@ check('TC-B10a 篡改token→401', r.status === 401, `status=${r.status}`);
 r = await req('/api/auth/logout', { method: 'POST', token });
 r = await req('/api/auth/me', { token });
 check('TC-B10b logout后token复用→401', r.status === 401, `status=${r.status}`);
-r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uname, password: 'Boundary#1' }) });
+r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uname, password: 'Boundary#1', agree: true }) });
 if (r.status === 200 && r.data) token = r.data.token;
 // 过期session（直接改库）
 const { DatabaseSync } = await import('node:sqlite');
@@ -153,7 +152,7 @@ bdb.prepare('UPDATE sessions SET expires=1 WHERE token=?').run(token);
 bdb.close();
 r = await req('/api/auth/me', { token });
 check('TC-B10c 过期session→401', r.status === 401, `status=${r.status}`);
-r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uname, password: 'Boundary#1' }) });
+r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uname, password: 'Boundary#1', agree: true }) });
 if (r.status === 200 && r.data) token = r.data.token;
 
 // ---- TC-B11 同日连续打卡（本地库纯函数，10次→1行）----
@@ -175,8 +174,8 @@ for (const id of keep) await req(`/api/records/${id}`, { method: 'DELETE', token
 
 // ---- TC-B13 无key用户校对→403引导不崩溃 ----
 const nkName = 'nokey' + Date.now().toString(36).slice(-4);
-await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: nkName, password: 'NoKey#123' }) });
-const t2r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: nkName, password: 'NoKey#123' }) });
+await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: nkName, password: 'NoKey#123', agree: true }) });
+const t2r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: nkName, password: 'NoKey#123', agree: true }) });
 const t2 = t2r.data && t2r.data.token;
 r = await req('/api/ai/proofread', { method: 'POST', body: JSON.stringify({ text: '短文本', params: {} }), token: t2, timeoutMs: 60000 });
 check('TC-B13 无key→403引导(不崩不挂起)', r.status === 403, `status=${r.status} ${JSON.stringify(r.data).slice(0, 80)}`);
@@ -195,7 +194,7 @@ check('TC-B16 导入截断至100000字符', r.status === 200 && r.data.chars ===
 
 // ---- TC-B18/B19 maxChunk钳制（真实key短调用，start事件回显）----
 try {
-  const apiKey = fs.readFileSync('config/key.txt/项目管理/API.txt', 'utf8').trim();
+  const apiKey = fs.readFileSync('config/key.txt', 'utf8').trim();
   if (apiKey) {
     r = await req('/api/apikey', { method: 'PUT', body: JSON.stringify({ key: apiKey }), token, timeoutMs: 90000 });
     const hasKey = r.status === 200;

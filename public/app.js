@@ -40,6 +40,10 @@ let lastMeta = null;                    // docx 格式元数据（交稿检查�
 const editorHistory = [];               // 撤销栈（最多7次，PRD AC4）
 const reviewDocs = [];                  // 参考版综述多文献（每批≤6篇）
 let proofreadState = null;              // 分段校对进行中的状态
+// U1修复（v0.5）：各工具功能独立工作区状态——切换功能互不清空，结果不再混用
+const fnState = {};
+let translatePairs = null;              // M4 D4-1 逐句对照（当前译文句对）
+let lastReportData = null;              // M8 最近一次交稿检查报告数据（G-5 原稿副本导出用）
 
 // ============================================================
 // 功能注册表：左侧主要功能 → 主区细部功能
@@ -54,7 +58,7 @@ const FNS = {
         <select id="optLang"><option value="en2zh">英 → 中</option><option value="zh2en">中 → 英</option></select></div>
       <div class="opt-row"><span>模型</span><select id="optModel">${modelOpts()}</select></div>
       <div class="opt-row"><span>温度</span><select id="optTemp"><option value="0.3" selected>0.3（稳定）</option><option value="0.7">0.7（多样）</option></select></div>`,
-    run: (text) => runStream('/api/ai/translate', text, { lang: $('#optLang').value }),
+    run: (text) => runTranslate(text),
   },
   proofread: {
     title: '分段校对', desc: '智能分段逐块校对机械错误（错别字/标点/空格），逐条确认后可应用到原文', editorTitle: '📝 原文（长文将自动分段处理）',
@@ -78,7 +82,7 @@ const FNS = {
   },
   review: {
     title: '参考版文献综述', desc: '上传 ≤6 篇文献，按主题整合生成参考版综述（引用[1][2]标注）', editorTitle: '📝 文献内容（可导入多篇，每批≤6篇）',
-    hint: 'M7 · 按主题整合而非逐篇罗列；固定AI声明「为参考版，引用与论断均需人工核验后方可使用」。',
+    hint: 'M7 · 按主题整合而非逐篇罗列；固定AI声明「为参考版，引用与论断均需人工核验后方可使用」。⚠️ 学术边界：输出为参考草稿，禁止直接作为论文章节使用，请自行重写（见学术诚信规范）。',
     sample: '',
     opts: () => `
       <div class="opt-row"><span>模型</span><select id="optModel">${modelOpts()}</select></div>
@@ -126,6 +130,7 @@ const FNS = {
       <div class="opt-note ok" id="fmtMetaNote">${lastMeta ? '✅ 已载入 docx 格式元数据，将执行格式检查' : '💡 导入 .docx 文件后，此处将自动执行格式检查'}</div>`,
     run: async (text) => {
       const d = await api.req('/api/checkreport', { method: 'POST', body: JSON.stringify({ text, fmt: $('#optFmt').value, meta: lastMeta }) });
+      lastReportData = d;
       renderReport(d);
       return reportText(d);
     },
@@ -138,8 +143,8 @@ const FNS = {
   },
 };
 function modelOpts() {
-  return '<option value="deepseek-v4-flash" selected>deepseek-v4-flash（快·推荐）</option>' +
-    '<option value="deepseek-v4-pro">deepseek-v4-pro（强·⚠️易超时）</option>';
+  // 收敛（v0.5）：v4-pro 实测极不稳定（同一请求 0.1s~125s+），移除 UI 入口；管理员后台可恢复
+  return '<option value="deepseek-v4-flash" selected>deepseek-v4-flash（快·推荐）</option>';
 }
 
 // ============================================================
@@ -167,8 +172,11 @@ const WRITE_META = {
   progress: ['进度打卡', '全文字数统计、进度条、每日打卡与连续天数'],
 };
 function switchFn(fn) {
+  const prev = currentFn;
   currentFn = fn;
   const isWrite = WRITE_FNS.includes(fn);
+  // U1：离开工具页时快照当前工作区；进入工具页时恢复该功能自己的状态（切换互不清空）
+  if (!isWrite && prev && FNS[prev] && !WRITE_FNS.includes(prev)) saveFnState(prev);
   $('#writeViews').classList.toggle('hidden', !isWrite);
   $('#workspace').classList.toggle('hidden', isWrite);
   $('#resultPanel').classList.toggle('hidden', isWrite);
@@ -196,9 +204,52 @@ function switchFn(fn) {
   if (fn === 'records') { $('#runBtn').textContent = '🔄 刷新记录'; } else { $('#runBtn').textContent = '▶ 开始处理'; }
   $('#opts').innerHTML = f.opts ? f.opts() : '';
   bindFnOpts(fn);
+  restoreFnState(fn);
   if (fn === 'records') { loadRecords(); }
   if (fn === 'review') renderDocs();
 }
+// U1：各功能工作区快照与恢复（编辑器内容/结果面板/结果文本/状态）
+function saveFnState(fn) {
+  if (!fn || !FNS[fn] || FNS[fn].hideEditor) return;
+  fnState[fn] = fnState[fn] || {};
+  fnState[fn].text = $('#editor').value;
+  fnState[fn].resultHTML = $('#resultBox').innerHTML;
+  fnState[fn].resultText = lastResult;
+  fnState[fn].status = $('#resultStatus').textContent;
+}
+function restoreFnState(fn) {
+  const st = fnState[fn] || {};
+  $('#editor').value = st.text || '';
+  $('#charCount').textContent = $('#editor').value.length + ' 字';
+  // 分段校对：若本会话已有校对结果，从状态重建交互卡片（保留勾选与重试能力）
+  if (fn === 'proofread' && proofreadState && proofreadState.chunkContents && proofreadState.chunkContents.length) {
+    renderProofreadFromState();
+    lastResult = st.resultText || proofreadAllText();
+    return;
+  }
+  if (st.resultHTML !== undefined) {
+    $('#resultBox').innerHTML = st.resultHTML;
+    $('#resultStatus').textContent = st.status || '等待处理';
+  } else {
+    setResult('');
+  }
+  lastResult = st.resultText || '';
+}
+// M8 G-1：从交稿检查报告跳转分段校对（带入当前文本）
+window.goProofread = () => {
+  const t = (fnState.checkreport && fnState.checkreport.text) || $('#editor').value;
+  switchFn('proofread');
+  $('#editor').value = t;
+  $('#charCount').textContent = t.length + ' 字';
+};
+// M8 G-4：问题点击跳转——在原文中定位引用序号
+window.jumpTo = (n) => {
+  const ed = $('#editor');
+  const idx = ed.value.indexOf('[' + n + ']');
+  if (idx < 0) { alert('未在原文中找到 [' + n + ']'); return; }
+  ed.focus();
+  ed.setSelectionRange(idx, idx + String(n).length + 2);
+};
 function bindFnOpts(fn) {
   if (fn === 'review') {
     $('#addDocsBtn')?.addEventListener('click', () => $('#multiInput').click());
@@ -307,6 +358,7 @@ const escapeHtml = esc;
 
 // ---------- 通用流式（互译/四要素/综述） ----------
 async function runStream(path, text, extraParams) {
+  const startFn = currentFn;
   const headers = { Authorization: `Bearer ${api.token}`, 'Content-Type': 'application/json' };
   const params = {
     model: $('#optModel')?.value || 'deepseek-v4-flash',
@@ -316,8 +368,8 @@ async function runStream(path, text, extraParams) {
   const r = await fetch(API_BASE + path, { method: 'POST', headers, body: JSON.stringify({ text, params }) });
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `请求失败(${r.status})`); }
   const reader = r.body.getReader(); const dec = new TextDecoder();
-  $('#resultBox').innerHTML = '<div></div>';
-  let buf = '';
+  if (startFn === currentFn) $('#resultBox').innerHTML = '<div></div>';
+  let acc = ''; let buf = ''; let metaModel = '';
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -328,15 +380,73 @@ async function runStream(path, text, extraParams) {
       if (!s.startsWith('data:')) continue;
       const data = s.slice(5).trim();
       if (data === '[DONE]') break;
-      try { const j = JSON.parse(data); if (j.delta) appendDelta(j.delta); } catch {}
+      try { const j = JSON.parse(data); if (j.delta) { acc += j.delta; if (startFn === currentFn) appendDelta(j.delta); } if (j.meta) metaModel = j.meta.model || metaModel; } catch {}
     }
   }
-  const textOut = $('#resultBox').lastChild.textContent;
-  lastResult = textOut + '\n\n—— 本内容由AI生成，需人工核验（内容0修改红线） ——';
-  const el = $('#resultBox').lastChild;
-  el.textContent = lastResult;
-  $('#resultStatus').textContent = '完成（AI·需人工核验）';
+  // A4/C4（v0.5）：AI 生成内容显著标识——模型＋时间＋核验提示（深度合成规定第十七条）
+  const aiNote = `\n\n—— [AI生成] 模型 ${metaModel || 'deepseek-v4-flash'} · ${new Date().toLocaleString()} · 需人工核验（内容0修改红线） ——`;
+  lastResult = acc + aiNote;
+  if (startFn === currentFn) {
+    const el = $('#resultBox').lastChild;
+    if (el) el.textContent = lastResult;
+    $('#resultStatus').textContent = '完成（AI·需人工核验）';
+  } else {
+    // 处理中途切走了页面：结果写回该功能自己的状态，不污染当前视图
+    fnState[startFn] = fnState[startFn] || {};
+    fnState[startFn].resultText = lastResult;
+  }
   return lastResult;
+}
+
+// ---------- M4 D4-1：逐句对照 + 一键替换（v0.5） ----------
+function splitSents(text) {
+  return (String(text).match(/[^。！？.!?]+[。！？.!?]?/g) || []).map((s) => s.trim()).filter(Boolean);
+}
+async function runTranslate(text) {
+  const out = await runStream('/api/ai/translate', text, { lang: $('#optLang').value });
+  if (currentFn !== 'translate') return out;   // 已切走：不重绘当前视图
+  const cleanOut = String(out).replace(/—— 本内容由AI生成[\s\S]*$/, '').trim();
+  const srcSents = splitSents(text);
+  const tgtSents = splitSents(cleanOut);
+  if (srcSents.length && srcSents.length === tgtSents.length) {
+    translatePairs = { srcSents, tgtSents };
+    let html = '<div class="st-note">✅ 逐句对照（按句对齐；AI 生成需人工核验）</div><table class="fmt-table tr-table"><tr><th style="width:7%">#</th><th style="width:45%">原文</th><th style="width:40%">译文</th><th style="width:8%"></th></tr>';
+    srcSents.forEach((s, i) => {
+      html += `<tr><td>${i + 1}</td><td>${esc(s)}</td><td>${esc(tgtSents[i])}</td><td><button class="btn small ghost" data-tridx="${i}">替换</button></td></tr>`;
+    });
+    html += '</table><div class="st-foot"><button id="trApplyAll" class="btn primary small">全部替换到原文</button><span class="ai-note">替换仅将译文句写入左侧原文对应位置，请逐句核验术语与语义；仅限本人撰写的文献内容（学术边界）</span></div>';
+    $('#resultBox').innerHTML = html;
+    $('#resultStatus').textContent = '完成（逐句对照·AI·需人工核验）';
+    $('#resultBox').querySelectorAll('[data-tridx]').forEach((b) => b.addEventListener('click', () => replaceSent(Number(b.dataset.tridx))));
+    $('#trApplyAll')?.addEventListener('click', applyAllSents);
+  } else {
+    $('#resultStatus').textContent = '完成（句数未对齐，未生成对照表；AI·需人工核验）';
+  }
+  return out;
+}
+function replaceSent(i) {
+  if (!translatePairs) return;
+  const { srcSents, tgtSents } = translatePairs;
+  const s = srcSents[i];
+  const t = tgtSents[i];
+  const ed = $('#editor');
+  if (!ed.value.includes(s)) { alert('原文中未找到该句（可能已修改），请核对'); return; }
+  pushHistory();
+  ed.value = ed.value.replace(s, t);
+  $('#charCount').textContent = ed.value.length + ' 字';
+  const btn = $('#resultBox').querySelector(`[data-tridx="${i}"]`);
+  if (btn) { btn.textContent = '已替换'; btn.disabled = true; }
+}
+function applyAllSents() {
+  if (!translatePairs) return;
+  const { srcSents, tgtSents } = translatePairs;
+  if (!confirm(`将 ${srcSents.length} 句译文全部替换到原文？（可撤销，保留7次）`)) return;
+  pushHistory();
+  const ed = $('#editor');
+  let applied = 0;
+  srcSents.forEach((s, i) => { if (ed.value.includes(s)) { ed.value = ed.value.replace(s, tgtSents[i]); applied++; } });
+  $('#charCount').textContent = ed.value.length + ' 字';
+  $('#resultStatus').textContent = `已替换 ${applied}/${srcSents.length} 句（AI·需人工核验）`;
 }
 
 // ---------- M5 分段校对（SSE进度 + 块卡片 + 逐条应用 + 单块重试） ----------
@@ -351,6 +461,7 @@ function parseFixes(content) {
   return fixes;
 }
 async function runProofread(text) {
+  const startFn = currentFn;
   const headers = { Authorization: `Bearer ${api.token}`, 'Content-Type': 'application/json' };
   const params = {
     model: $('#optModel')?.value || 'deepseek-v4-flash',
@@ -359,7 +470,7 @@ async function runProofread(text) {
   };
   const r = await fetch(API_BASE + '/api/ai/proofread', { method: 'POST', headers, body: JSON.stringify({ text, params }) });
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `请求失败(${r.status})`); }
-  proofreadState = { chunks: [], chunkTexts: [], allFixes: [], chunkStatus: [] };
+  proofreadState = { chunks: [], chunkTexts: [], chunkContents: [], allFixes: [], chunkStatus: [], finished: false };
   const box = $('#resultBox');
   box.innerHTML = '';
   const reader = r.body.getReader(); const dec = new TextDecoder();
@@ -377,25 +488,41 @@ async function runProofread(text) {
       let j; try { j = JSON.parse(data); } catch { continue; }
       if (j.event === 'start') {
         proofreadState.chunkTexts = chunkLocal(text, j.maxChunk);
-        showProgress(true, `准备校对 ${j.chunks} 块…`, 2);
+        if (startFn === currentFn) showProgress(true, `准备校对 ${j.chunks} 块…`, 2);
       } else if (j.event === 'progress') {
-        showProgress(true, `正在校对第 ${j.index + 1}/${j.total} 块…`, Math.round((j.index / j.total) * 95));
+        if (startFn === currentFn) showProgress(true, `正在校对第 ${j.index + 1}/${j.total} 块…`, Math.round((j.index / j.total) * 95));
       } else if (j.event === 'chunk_done') {
         proofreadState.chunkStatus[j.index] = j.truncated ? 'warn' : 'ok';
         proofreadState.chunkTexts[j.index] = proofreadState.chunkTexts[j.index] || '';
-        renderChunkCard(j.index, j.content, proofreadState.chunkStatus[j.index], j.truncated ? '已自动细分处理（输出曾达上限）' : '');
+        proofreadState.chunkContents[j.index] = j.content;
+        if (startFn === currentFn) renderChunkCard(j.index, j.content, proofreadState.chunkStatus[j.index], j.truncated ? '已自动细分处理（输出曾达上限）' : '');
       } else if (j.event === 'chunk_error') {
         proofreadState.chunkStatus[j.index] = 'err';
-        renderChunkCard(j.index, j.message, 'err', '', true);
+        proofreadState.chunkContents[j.index] = j.message;
+        if (startFn === currentFn) renderChunkCard(j.index, j.message, 'err', '', true);
       } else if (j.event === 'end') {
-        showProgress(false);
-        renderProofreadSummary();
+        proofreadState.finished = true;
+        if (startFn === currentFn) { showProgress(false); renderProofreadSummary(); }
       }
     }
   }
   const txt = proofreadAllText();
   lastResult = txt;
   return txt;
+}
+// U1：切回分段校对页时从状态重建卡片（含勾选/重试按钮）
+function renderProofreadFromState() {
+  const st = proofreadState;
+  if (!st || !st.chunkContents || !st.chunkContents.length) return;
+  const box = $('#resultBox');
+  box.innerHTML = '';
+  st.allFixes = [];
+  st.chunkStatus.forEach((s, i) => {
+    if (st.chunkContents[i] !== undefined && s === 'err') renderChunkCard(i, st.chunkContents[i], 'err', '', true);
+    else if (st.chunkContents[i] !== undefined) renderChunkCard(i, st.chunkContents[i], s, s === 'warn' ? '已自动细分处理（输出曾达上限）' : '');
+  });
+  if (st.finished) renderProofreadSummary();
+  else showProgress(true, '校对进行中…', 50);
 }
 function chunkLocal(text, max) {
   // 与服务端同策略的轻量切块（仅用于前端展示块文本/重试），精确切块以服务端为准
@@ -504,7 +631,7 @@ function proofreadAllText() {
     out += `\n第 ${i + 1} 块：${s === 'err' ? '失败' : s === 'warn' ? '完成（已细分）' : '完成'}\n`;
   });
   const totalFixes = st.allFixes.length;
-  out += `\n共检出 ${totalFixes} 处机械错误（逐条见上方卡片）。\n—— 本内容由AI生成，需人工核验（内容0修改红线） ——`;
+  out += `\n共检出 ${totalFixes} 处机械错误（逐条见上方卡片）。\n—— [AI生成] 模型 ${$('#optModel')?.value || 'deepseek-v4-flash'} · ${new Date().toLocaleString()} · 需人工核验（内容0修改红线） ——`;
   return out;
 }
 
@@ -543,36 +670,60 @@ function reportText(d) {
 }
 function renderReport(d) {
   const pill = (s) => s === 'ok' ? '<span class="tag-pill ok">正常</span>' : s === 'warn' ? '<span class="tag-pill warn">需注意</span>' : '<span class="tag-pill na">未检查</span>';
-  let html = `<div class="section-title">一、引用核查（规则引擎）</div>
+  // M8 G-5：导出报告＋原稿副本；G-4：问题点击跳转定位原文
+  let html = `<div class="report-actions"><button class="btn small" onclick="window.exportReportWithOriginal()">📦 导出报告＋原稿副本(.docx)</button></div>
+    <div class="section-title">一、引用核查（规则引擎）</div>
     <div class="stats-row"><span class="stat-chip">文内引用 <b>${d.cite.intextCount}</b></span><span class="stat-chip">文末文献 <b>${d.cite.refCount}</b></span></div>
     <ul class="issue-list">`;
-  for (const it of d.cite.issues) html += `<li class="${d.cite.issues.length === 1 && d.cite.issues[0].startsWith('未发现') ? 'ok' : ''}">${esc(it)}</li>`;
+  for (const it of d.cite.issues) {
+    const jumpable = /文内引用序号|文末文献|序号错位|跳号/.test(it);
+    const num = jumpable ? (it.match(/\d{1,3}/) || [null])[0] : null;
+    const jump = num ? ` <button class="btn ghost small" onclick="window.jumpTo(${num})">定位</button>` : '';
+    html += `<li class="${d.cite.issues.length === 1 && d.cite.issues[0].startsWith('未发现') ? 'ok' : ''}">${esc(it)}${jump}</li>`;
+  }
   html += `</ul><div class="section-title">二、基础格式检查（只检不改）</div><table class="fmt-table">
     <tr><th style="width:110px">检查项</th><th style="width:80px">结论</th><th>说明</th></tr>`;
   for (const row of d.format) html += `<tr><td>${esc(row.item)}</td><td>${pill(row.status)}</td><td>${esc(row.note)}</td></tr>`;
-  html += `</table><div class="ai-note">${esc(d.rule)} · 全部问题仅列出定位，不做任何自动修改（内容0修改红线）</div>`;
+  html += `</table><div class="section-title">三、机械校对（分段校对）</div>`;
+  // M8 G-1：校对汇总入口并入交稿报告
+  if (proofreadState && proofreadState.chunkContents && proofreadState.chunkContents.length) {
+    const done = proofreadState.chunkStatus.filter((s) => s === 'ok' || s === 'warn').length;
+    const total = proofreadState.chunkStatus.length;
+    html += `<div class="stats-row"><span class="stat-chip">本次会话校对 <b>${done}/${total}</b> 块</span><span class="stat-chip">检出 <b>${proofreadState.allFixes.length}</b> 处</span></div>
+      <div class="ai-note">校对结果未并入本报告（只检不改红线）；请前往「分段校对」逐条确认后应用到原文。</div>
+      <button class="btn small" onclick="window.goProofread()">✅ 前往分段校对（带入当前文本）</button>`;
+  } else {
+    html += `<div class="ai-note">尚未运行分段校对。交稿前建议先做一次机械校对（错别字/标点/空格）：</div>
+      <button class="btn small" onclick="window.goProofread()">✅ 前往分段校对（带入当前文本）</button>`;
+  }
+  html += `<div class="ai-note">${esc(d.rule)} · 全部问题仅列出定位，不做任何自动修改（内容0修改红线）</div>`;
   setResultHTML(html, '完成（规则引擎·确定性）');
 }
 
 // ============================================================
 // 运行入口
 // ============================================================
-$('#runBtn').addEventListener('click', async () => {
-  const f = FNS[currentFn];
-  if (currentFn === 'records') { await loadRecords(); return; }
+$('#runBtn').addEventListener('click', () => {
+  if (currentFn === 'records') { loadRecords(); return; }
   const text = $('#editor').value;
   if (!text.trim() && !reviewDocs.length && !(currentFn === 'review')) { setResult('⚠️ 请先粘贴或导入文本', true); return; }
   if (!api.token) { showModal('login'); return; }
+  // B3（v0.5）：AI 功能首次使用前披露"输入将发送至 DeepSeek"
+  if (['translate', 'analyze', 'review', 'proofread'].includes(currentFn)) ensureAiDisclosure(() => doRun(text));
+  else doRun(text);
+});
+async function doRun(text) {
   setResult(''); lastResult = '';
   $('#resultStatus').textContent = '处理中…';
   $('#resultBox').innerHTML = '<div><span class="empty">正在处理</span><span class="cursor"></span></div>';
   try {
+    const f = FNS[currentFn];
     const out = await f.run(text);
     if (out && currentFn !== 'proofread' && currentFn !== 'citecheck' && currentFn !== 'checkreport') {
       lastResult = out;
     }
   } catch (e) { setResult('❌ ' + e.message, true); $('#resultStatus').textContent = '失败'; }
-});
+}
 
 // ============================================================
 // 保存 / 导出 / 复制
@@ -585,18 +736,31 @@ $('#saveBtn').addEventListener('click', async () => {
     setResult(lastResult + '\n\n✅ 已保存为记录 #' + d.id + '（仅保存结果，原文不落库）');
   } catch (e) { setResult('❌ ' + e.message, true); }
 });
+async function doExportSections(title, sections, fmt) {
+  const r = await fetch(API_BASE + '/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, sections, fmt }) });
+  if (!r.ok) throw new Error('导出失败');
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = (title || '定稿AI导出') + '.' + fmt;
+  a.click(); URL.revokeObjectURL(a.href);
+}
 async function doExport(fmt) {
   if (!lastResult.trim()) { setResult('⚠️ 暂无结果可导出', true); return; }
   try {
     const d = { title: FNS[currentFn].title + '结果', sections: [{ heading: FNS[currentFn].title + '结果', body: lastResult }] };
-    const r = await fetch(API_BASE + '/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...d, fmt }) });
-    if (!r.ok) throw new Error('导出失败');
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = (d.title || '定稿AI导出') + '.' + fmt;
-    a.click(); URL.revokeObjectURL(a.href);
+    await doExportSections(d.title, d.sections, fmt);
   } catch (e) { setResult('❌ ' + e.message, true); }
 }
+// M8 G-5：导出报告＋原稿副本（另存副本，不改原稿）
+window.exportReportWithOriginal = async () => {
+  if (!lastReportData) { alert('请先运行交稿检查'); return; }
+  try {
+    await doExportSections('交稿检查报告', [
+      { heading: '交稿检查报告', body: reportText(lastReportData) },
+      { heading: '原稿副本（供对照定位；仅随报告导出，服务端不存储）', body: $('#editor').value },
+    ], 'docx');
+  } catch (e) { setResult('❌ ' + e.message, true); }
+};
 $('#exportTxtBtn').addEventListener('click', () => doExport('txt'));
 $('#exportDocxBtn').addEventListener('click', () => doExport('docx'));
 $('#copyBtn').addEventListener('click', async () => {
@@ -609,7 +773,7 @@ $('#copyBtn').addEventListener('click', async () => {
 // 登录 / 我的Key
 // ============================================================
 let authMode = 'login';
-function showModal(mode) { authMode = mode; $('#modalTitle').textContent = mode === 'login' ? '登录定稿AI' : '注册新账号'; $('#authSubmit').textContent = mode === 'login' ? '登录' : '注册'; $('#authToggle').textContent = mode === 'login' ? '去注册' : '去登录'; $('#authMsg').textContent = ''; $('#modal').classList.remove('hidden'); }
+function showModal(mode) { authMode = mode; $('#modalTitle').textContent = mode === 'login' ? '登录定稿AI' : '注册新账号'; $('#authSubmit').textContent = mode === 'login' ? '登录' : '注册'; $('#authToggle').textContent = mode === 'login' ? '去注册' : '去登录'; $('#authMsg').textContent = ''; $('#authAgree').classList.toggle('hidden', mode !== 'register'); $('#modal').classList.remove('hidden'); }
 function hideModal() { $('#modal').classList.add('hidden'); }
 function setAuth(ok2, msg) { const m = $('#authMsg'); m.textContent = msg; m.className = 'msg ' + (ok2 ? 'ok' : 'err'); }
 async function authSubmit() {
@@ -621,8 +785,12 @@ async function authSubmit() {
       setAuth(true, '登录成功'); hideModal(); refreshUser(); loadRecords();
       switchFn(currentFn);   // 登录成功后立即渲染当前功能页（避免停在登录前状态）
     } else {
-      await api.req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username, password }) });
-      setAuth(true, '注册成功，请登录'); authMode = 'login'; $('#modalTitle').textContent = '登录定稿AI'; $('#authSubmit').textContent = '登录'; $('#authToggle').textContent = '去注册';
+      // B1 告知同意（v0.5）：注册须勾选三份协议＋年龄确认
+      if (!($('#agreeTerms').checked && $('#agreePrivacy').checked && $('#agreeEthics').checked && $('#agreeAge').checked)) {
+        setAuth(false, '请先勾选同意《用户协议》《隐私政策》《学术诚信使用规范》并确认已年满 18 周岁'); return;
+      }
+      await api.req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username, password, agree: true }) });
+      setAuth(true, '注册成功，请登录'); authMode = 'login'; $('#modalTitle').textContent = '登录定稿AI'; $('#authSubmit').textContent = '登录'; $('#authToggle').textContent = '去注册'; $('#authAgree').classList.add('hidden');
     }
   } catch (e) { setAuth(false, e.message); }
 }
@@ -632,15 +800,17 @@ async function refreshUser() {
     $('#userName').textContent = '本地模式（未登录）';
     $('#userName').classList.remove('hidden');
     $('#keyBtn').classList.add('hidden');
-    $('#loginBtn').classList.remove('hidden'); $('#logoutBtn').classList.add('hidden');
+    $('#loginBtn').classList.remove('hidden'); $('#logoutBtn').classList.add('hidden'); $('#delAcctBtn').classList.add('hidden');
     return;
   }
   try {
     const u = await api.req('/api/auth/me');
     api.userId = u.id;
+    // B1（v0.5）：存量用户未同意新协议 → 弹补签弹窗
+    if (!u.agreed) { $('#consentModal').classList.remove('hidden'); }
     $('#userName').textContent = u.username + (u.isAdmin ? '（管理员）' : '');
     $('#userName').classList.remove('hidden');
-    $('#loginBtn').classList.add('hidden'); $('#logoutBtn').classList.remove('hidden');
+    $('#loginBtn').classList.add('hidden'); $('#logoutBtn').classList.remove('hidden'); $('#delAcctBtn').classList.remove('hidden');
     $('#keyBtn').classList.remove('hidden');
     $('#keyBtn').textContent = '🔑 API Key';   // 不显示 sk- 掩码，仅钥匙图标＋标签
   } catch { api.token = ''; api.userId = null; localStorage.removeItem('dg_token'); }
@@ -675,6 +845,83 @@ $('#keyDelete').addEventListener('click', async () => {
   try { await api.req('/api/apikey', { method: 'DELETE' }); $('#keyBtn').textContent = '🔑 API Key'; const s = $('#keyStatus'); s.className = 'msg ok'; s.textContent = '已删除，AI功能恢复为平台Key规则'; refreshUser(); }
   catch (e) { const s = $('#keyStatus'); s.className = 'msg err'; s.textContent = e.message; }
 });
+
+// ============================================================
+// v0.5 合规交互：补签协议 / AI披露 / 投诉举报 / 注销 / 新手引导 / 帮助
+// ============================================================
+// ---- B1：存量用户补签协议 ----
+$('#consentOk').addEventListener('change', () => { $('#consentSubmit').disabled = !$('#consentOk').checked; });
+$('#consentSubmit').addEventListener('click', async () => {
+  try {
+    await api.req('/api/consent', { method: 'POST' });
+    $('#consentModal').classList.add('hidden');
+    refreshUser();
+  } catch (e) { const m = $('#consentMsg'); m.textContent = e.message; m.className = 'msg err'; }
+});
+// ---- B3：首次 AI 调用披露弹窗 ----
+let aiDisclosureCb = null;
+function ensureAiDisclosure(cb) {
+  const k = 'dg_ai_disclosed_' + (api.userId || 'guest');
+  if (localStorage.getItem(k) === '1') { cb(); return; }
+  aiDisclosureCb = cb;
+  $('#aiModal').classList.remove('hidden');
+}
+$('#aiModalOk').addEventListener('click', () => {
+  localStorage.setItem('dg_ai_disclosed_' + (api.userId || 'guest'), '1');
+  $('#aiModal').classList.add('hidden');
+  const cb = aiDisclosureCb; aiDisclosureCb = null;
+  if (cb) cb();
+});
+$('#aiModalClose').addEventListener('click', () => { $('#aiModal').classList.add('hidden'); aiDisclosureCb = null; });
+// ---- C3：投诉与举报（15日处理承诺） ----
+$('#feedbackLink').addEventListener('click', (e) => { e.preventDefault(); $('#fbModal').classList.remove('hidden'); });
+$('#fbClose').addEventListener('click', () => $('#fbModal').classList.add('hidden'));
+$('#fbSubmit').addEventListener('click', async () => {
+  const content = $('#fbContent').value.trim();
+  if (!content) { const m = $('#fbMsg'); m.textContent = '请填写反馈内容'; m.className = 'msg err'; return; }
+  try {
+    const d = await api.req('/api/feedback', { method: 'POST', body: JSON.stringify({ type: $('#fbType').value, content, contact: $('#fbContact').value.trim() }) });
+    const m = $('#fbMsg'); m.textContent = d.message; m.className = 'msg ok';
+    $('#fbContent').value = '';
+  } catch (e) { const m = $('#fbMsg'); m.textContent = e.message; m.className = 'msg err'; }
+});
+// ---- B4：账号注销（PIPL 第四十七条） ----
+$('#delAcctBtn').addEventListener('click', async () => {
+  if (!confirm('注销账号将删除服务端全部数据（账号/密钥/记录），调用日志匿名化，不可恢复。\n浏览器本地的论文/大纲/打卡从未上传，请先确认已导出备份。\n\n确定注销？')) return;
+  const pw = prompt('请输入密码确认注销：');
+  if (!pw) return;
+  try {
+    const d = await api.req('/api/auth/delete-account', { method: 'POST', body: JSON.stringify({ password: pw }) });
+    api.token = ''; api.userId = null; localStorage.removeItem('dg_token');
+    refreshUser(); loadRecords();
+    alert(d.message);
+  } catch (e) { alert(e.message); }
+});
+// ---- 新手引导（含学术诚信第 0 步，呼应 A5/F3/U2） ----
+const OB_STEPS = [
+  { title: '第 0 步 · 学术诚信须知', body: '<b>AI 是辅助工具，不是论文的作者。</b><br>① AI 生成内容需人工核验、重写后方可使用；<br>② 禁止将 AI 生成内容直接作为本人成果提交（《学位法》/《学位论文作假行为处理办法》）；<br>③ 本产品不提供论文代写与查重规避（学术伦理红线）；<br>④ 学校规定优先于本工具的任何建议。详见<a href="ethics.html" target="_blank">《学术诚信使用规范》</a>' },
+  { title: '第 1 步 · 配置你的 Key', body: 'AI 功能采用 BYOK 模式：点击左侧「🔑 我的Key」，配置你自己的 DeepSeek Key（加密保存、仅显示掩码、保存前本地核对）。未配置时 AI 功能会给出引导提示；写作/大纲/打卡/导出无需 Key。' },
+  { title: '第 2 步 · 体验选题', body: '从左侧「🎯 选题助手」开始：描述你的实际工程问题，AI 生成 3-5 个选题（六要素），可追问迭代、一键采纳（自动生成标准章节结构）。' },
+  { title: '第 3 步 · 进入写作', body: '「📑 大纲生成」→「📝 本地编写」按章节写作：自动保存到本浏览器（服务器零存储），记得定期「💾 导出全文Word」备份；「📊 进度打卡」看字数与连续天数。交稿前用「📋 交稿检查报告」做最后核查。' },
+];
+let obIdx = 0;
+function showOb(i) {
+  obIdx = i;
+  $('#obTitle').textContent = OB_STEPS[i].title;
+  $('#obBody').innerHTML = OB_STEPS[i].body;
+  $('#obPrev').classList.toggle('hidden', i === 0);
+  $('#obNext').textContent = i === OB_STEPS.length - 1 ? '开始使用' : '下一步';
+  $('#obModal').classList.remove('hidden');
+}
+$('#obNext').addEventListener('click', () => {
+  if (obIdx === OB_STEPS.length - 1) { localStorage.setItem('dg_onboarded', '1'); $('#obModal').classList.add('hidden'); }
+  else showOb(obIdx + 1);
+});
+$('#obPrev').addEventListener('click', () => { if (obIdx > 0) showOb(obIdx - 1); });
+$('#obClose').addEventListener('click', () => { localStorage.setItem('dg_onboarded', '1'); $('#obModal').classList.add('hidden'); });
+// ---- F2：帮助与质量口径 ----
+$('#helpLink').addEventListener('click', (e) => { e.preventDefault(); $('#helpModal').classList.remove('hidden'); });
+$('#helpClose').addEventListener('click', () => $('#helpModal').classList.add('hidden'));
 
 // ============================================================
 // 记录
@@ -762,6 +1009,7 @@ $('#tpGenBtn').addEventListener('click', async () => {
   const problem = $('#tpProblem').value.trim();
   if (!problem) { $('#tpStatus').textContent = '⚠️ 请填写实际工程问题'; return; }
   if (!writeGuard()) return;
+  if (!localStorage.getItem('dg_ai_disclosed_' + (api.userId || 'guest'))) { ensureAiDisclosure(() => $('#tpGenBtn').click()); return; }
   $('#tpStatus').textContent = 'AI 思考中（约 20-60 秒，输入仅内存中转、服务端不存储）…';
   $('#tpGenBtn').disabled = true;
   try {
@@ -820,6 +1068,7 @@ async function topicAsk() {
   const q = $('#tpAsk').value.trim();
   if (!q) return;
   if (!topicLocal) { alert('请先生成选题'); return; }
+  if (!localStorage.getItem('dg_ai_disclosed_' + (api.userId || 'guest'))) { ensureAiDisclosure(() => topicAsk()); return; }
   try {
     $('#tpAskBtn').disabled = true;
     $('#tpAskBtn').textContent = '思考中…';
@@ -936,6 +1185,7 @@ $('#olGenBtn').addEventListener('click', async () => {
   const title = $('#olGenTitle').value.trim();
   if (!title) { $('#olStatus').textContent = '⚠️ 请填写选题/论文标题'; return; }
   if (!writeGuard()) return;
+  if (!localStorage.getItem('dg_ai_disclosed_' + (api.userId || 'guest'))) { ensureAiDisclosure(() => $('#olGenBtn').click()); return; }
   $('#olStatus').textContent = 'AI 生成中（约 20-60 秒，输入仅内存中转、服务端不存储）…';
   $('#olGenBtn').disabled = true;
   try {
@@ -1083,6 +1333,22 @@ function updateBackupWarn() {
 }
 $('#chExportDocx').addEventListener('click', () => thesisExport('docx'));
 $('#chExportTxt').addEventListener('click', () => thesisExport('txt'));
+// v0.5：一键备份全部数据（论文全文＋大纲＋打卡记录，缓解"换设备不可见"取舍）
+$('#chBackupAll').addEventListener('click', async () => {
+  try {
+    await flushSave();
+    const t = await L().getThesis(localId());
+    const ck = await L().getCheckins(localId());
+    let out = `【定稿AI 全量备份 · ${new Date().toLocaleString()}】\n\n===== 论文全文 =====\n` + DingaoLocal.thesisToTxt(t.title, writingState.tree)
+      + `\n\n===== 大纲 =====\n` + DingaoLocal.outlineToTxt(t.title, writingState.tree)
+      + `\n\n===== 打卡记录 =====\n`;
+    ck.forEach((x) => { out += `${x.date}\t+${x.word_delta}\t${x.total_words}\t${x.note || ''}\n`; });
+    downloadText(t.title + '-全量备份.txt', out);
+    localStorage.setItem('dg_last_export', String(Date.now()));
+    updateBackupWarn();
+    $('#chSaveState').textContent = '✅ 已导出全量备份（论文+大纲+打卡，本机生成未经过服务器）';
+  } catch (e) { alert(e.message); }
+});
 
 // ---------- M12 进度打卡（本地统计·零AI成本·零上传） ----------
 async function renderProgress() {
@@ -1117,6 +1383,16 @@ $('#pgTargetBtn').addEventListener('click', async () => {
     await L().saveThesis(localId(), t);
     alert('目标已设为 ' + t.target_words + ' 字（仅存本浏览器）');
     renderProgress();
+  } catch (e) { alert(e.message); }
+});
+// M12 P-4：打卡记录导出 txt（v0.5）
+$('#pgExportBtn').addEventListener('click', async () => {
+  try {
+    const t = await L().getThesis(localId());
+    const ck = await L().getCheckins(localId());
+    const lines = [`《${t.title}》打卡记录（导出时间：${new Date().toLocaleString()}）`, '日期\t当日新增\t累计字数\t备注'];
+    ck.forEach((x) => lines.push(`${x.date}\t+${x.word_delta}\t${x.total_words}\t${x.note || ''}`));
+    downloadText(t.title + '-打卡记录.txt', lines.join('\n'));
   } catch (e) { alert(e.message); }
 });
 $('#pgCheckinBtn').addEventListener('click', async () => {
@@ -1166,3 +1442,4 @@ setResult('');
 refreshUser();
 loadRecords();
 checkHealth();
+if (!localStorage.getItem('dg_onboarded')) showOb(0);   // v0.5：首次访问新手引导（含学术诚信第 0 步）

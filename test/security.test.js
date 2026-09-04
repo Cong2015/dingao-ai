@@ -50,8 +50,8 @@ const ts = Date.now().toString(36).slice(-5);
 const uA = 'sca_' + ts, uB = 'scb_' + ts;
 let tA = '', tB = '';
 for (const [u, pw] of [[uA, 'SamePass#1'], [uB, 'SamePass#1']]) {
-  await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: u, password: pw }) });
-  const lr = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: pw }) });
+  await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: u, password: pw, agree: true }) });
+  const lr = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: pw, agree: true }) });
   if (u === uA) tA = lr.data && lr.data.token; else tB = lr.data && lr.data.token;
 }
 check('TC-SC00 双账号准备', !!tA && !!tB, '');
@@ -87,10 +87,10 @@ const ridA = r.data && r.data.id;
 r = await req(`/api/records/${ridA}`, { token: tB });
 check('TC-SC04 B的token访问A的记录→404(L-4)', r.status === 404, `status=${r.status}`);
 r = await req(`/api/records/${ridA}`, { method: 'DELETE', token: tB });
-// 实现：DELETE 带 user_id 条件（数据未删），但匹配0行也返回200「已删除」——响应语义发现项
+// FIND-04已修复（v0.5）：他人记录无命中→404（原0行删除仍返回200「已删除」语义误导）
+check('TC-SC04b B删除A的记录→404(FIND-04修复)', r.status === 404, `status=${r.status}`);
 const afterDel = await req(`/api/records/${ridA}`, { token: tA });
-check('TC-SC04b B删除后A的记录仍存在(数据未越权删除)', afterDel.status === 200 && afterDel.data.output === 'secretA', `status=${afterDel.status}`);
-if (r.status === 200 && afterDel.status === 200) findings.push({ name: 'TC-SC04b 发现项', detail: 'DELETE /api/records/:rid 对他人记录返回200「已删除」但实际0行受影响（幂等语义误导）；数据未越权删除（WHERE user_id 生效）。报产品裁定响应语义（建议404）' });
+check('TC-SC04c B删除后A的记录仍存在(数据未越权删除)', afterDel.status === 200 && afterDel.data.output === 'secretA', `status=${afterDel.status}`);
 
 // ---- TC-SC05 未授权访问（无token遍历全部路由，带合法body使鉴权前置校验通过）----
 const unauth = [];
@@ -120,8 +120,8 @@ for (const [p, opt] of [
   const rr = await req(p, { ...opt, timeoutMs: 20000 });
   toolOpen.push(`${p}=${rr.status}`);
 }
-check('TC-SC05b 工具端点免登录可用(设计:纯内存零落盘,如实记录)', toolOpen.length === 4, toolOpen.join(', '));
-findings.push({ name: 'TC-SC05b 发现项', detail: 'import/export/citecheck/checkreport 四个工具端点无需登录（纯内存解析零落盘设计）。匿名资源消耗面（无鉴权无速率限制）——报产品裁定是否加 IP 级限流' });
+check('TC-SC05b 工具端点免登录可用(设计:纯内存零落盘)', toolOpen.length === 4, toolOpen.join(', '));
+// FIND-05已修复（v0.5）：工具端点已加 IP 级限流（每5分钟60次），触发验证见文末 TC-SC05c
 
 // ---- TC-SC06 会话伪造 ----
 r = await req('/api/auth/me', { token: tA.slice(0, -4) + 'ffff' });
@@ -141,14 +141,13 @@ check('TC-SC07a 密码非明文存储', !!ua && ua.pass_hash !== 'SamePass#1' &&
 check('TC-SC07b 独立salt且同密码不同哈希', !!ua && !!ub && ua.salt !== ub.salt && ua.pass_hash !== ub.pass_hash, '');
 sdb.close();
 
-// ---- TC-SC09 暴力破解（发现项：无失败锁定）----
-let locked = false;
+// ---- TC-SC09 暴力破解（FIND-02已修复v0.5：同用户名+IP连续5次失败锁15分钟）----
+let lockedAt = 0;
 for (let i = 0; i < 20; i++) {
   const rr = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uA, password: 'wrong' + i }) });
-  if (rr.status === 429 || rr.status === 423) { locked = true; break; }
+  if (rr.status === 429) { lockedAt = i + 1; break; }
 }
-check('TC-SC09 20次错密码全部401(无锁定机制)', !locked, '无失败锁定——独立发现项：暴力破解面，报产品/开发决策');
-findings.push({ name: 'TC-SC09 独立发现项', detail: '登录无失败次数锁定，20次连续错误密码仅401无429——存在暴力破解面（方案§7风险清单口径）' });
+check('TC-SC09 连续失败触发429锁定(FIND-02修复)', lockedAt >= 5 && lockedAt <= 10, `第${lockedAt}次触发429`);
 
 // ---- TC-SC10 密钥防护 ----
 r = await req('/api/apikey', { token: tA });
@@ -196,6 +195,14 @@ r = await req('/api/import', { method: 'POST', headers: { 'X-Filename': 'notmp.t
 const after = fs.readdirSync(path.join(__dirname, '..'));
 const newFiles = after.filter((f) => !before.has(f));
 check('TC-SC17 导入后服务端目录零新增文件(D5-3)', newFiles.length === 0, `新增: ${newFiles.join(', ')}`);
+
+// ---- TC-SC05c 工具端点IP限流（FIND-05修复v0.5：每5分钟60次→429；置于所有工具用例之后）----
+let tool429 = 0;
+for (let i = 0; i < 65; i++) {
+  const rr = await req('/api/citecheck', { method: 'POST', body: JSON.stringify({ text: '限流[1]' }), timeoutMs: 20000 });
+  if (rr.status === 429) { tool429 = i + 1; break; }
+}
+check('TC-SC05c 工具端点触发429(FIND-05修复)', tool429 > 0, `第${tool429}次触发429`);
 
 // ---- TC-SC08 限流（最后执行：61次无key调用→429；重启实例验证恢复）----
 let got429 = 0, total = 0;

@@ -47,8 +47,8 @@ lat = [];
 for (let i = 0; i < 50; i++) {
   const u = 'p' + Date.now().toString(36).slice(-5) + i;
   const { ms } = await timeIt(async () => {
-    await baseReq('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: u, password: 'Perf#12345' }) });
-    return baseReq('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: 'Perf#12345' }) });
+    await baseReq('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: u, password: 'Perf#12345', agree: true }) });
+    return baseReq('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: 'Perf#12345', agree: true }) });
   });
   lat.push(ms);
 }
@@ -84,8 +84,8 @@ check('TC-P05 10万字txt导入<5s(校准值' + t5.ms.toFixed(0) + 'ms)', t5.ms 
 
 // ---- TC-P06 并发压力 20并发×10请求混合 ----
 const u6 = 'conc_' + Date.now().toString(36).slice(-5);
-await baseReq('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: u6, password: 'Conc#12345' }) });
-const l6 = await (await baseReq('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u6, password: 'Conc#12345' }) })).json();
+await baseReq('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: u6, password: 'Conc#12345', agree: true }) });
+const l6 = await (await baseReq('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u6, password: 'Conc#12345', agree: true }) })).json();
 const tk = l6.token;
 const mkReq = (i) => {
   if (i % 3 === 0) return baseReq('/api/health');

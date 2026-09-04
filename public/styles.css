@@ -367,3 +367,20 @@ input[type="number"] {
   .main { padding: 14px 12px 30px; }
   .topbar { flex-direction: column; align-items: flex-start; }
 }
+
+/* ============ v0.5 合规与工作区改造样式 ============ */
+.agree-box { margin: 8px 0; }
+.agree-row { display: block; font-size: 13px; margin: 6px 0; color: #444; }
+.agree-row input { margin-right: 6px; }
+.side-links { font-size: 12px; color: #9aa3b2; line-height: 1.9; padding: 8px 6px; border-top: 1px solid rgba(255,255,255,.06); }
+.side-links a { color: #b8c2d4; text-decoration: none; }
+.side-links a:hover { color: #fff; }
+.nav-more summary { cursor: pointer; color: #9aa3b2; font-size: 13px; padding: 8px 14px; list-style: none; }
+.nav-more summary:hover { color: #fff; }
+.nav-more .nav-item { display: block; width: 100%; }
+.report-actions { margin-bottom: 10px; }
+.st-note { font-size: 13px; color: #0B8A63; margin-bottom: 8px; }
+.st-foot { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.tr-table td { vertical-align: top; }
+.mini-btn.danger { color: #ff8a80; }
+.mini-btn.danger:hover { background: rgba(255,107,107,.15); }

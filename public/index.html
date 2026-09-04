@@ -27,8 +27,12 @@
       <div class="nav-group">
         <div class="nav-title">🌐 文献工具</div>
         <button class="nav-item" data-fn="translate">🌏 中英互译<span class="tag">M4</span></button>
-        <button class="nav-item" data-fn="analyze">🔬 四要素分析</button>
-        <button class="nav-item" data-fn="review">📚 参考版综述</button>
+        <!-- 收敛（v0.5）：M6/M7 收至二级入口，降低首屏学习成本 -->
+        <details class="nav-more">
+          <summary>🧰 更多工具</summary>
+          <button class="nav-item" data-fn="analyze">🔬 四要素分析</button>
+          <button class="nav-item" data-fn="review">📚 参考版综述</button>
+        </details>
       </div>
       <div class="nav-group">
         <div class="nav-title">🧾 交稿核查</div>
@@ -44,10 +48,15 @@
     <div class="side-foot">
       <div class="access-info" id="accessInfo">访问地址：检测中…</div>
       <button id="keyBtn" class="key-btn hidden">🔑 我的Key</button>
+      <div class="side-links">
+        <a href="privacy.html" target="_blank">隐私政策</a> · <a href="terms.html" target="_blank">用户协议</a> · <a href="ethics.html" target="_blank">学术诚信</a><br>
+        <a href="#" id="feedbackLink">📮 投诉与举报</a> · <a href="#" id="helpLink">❓ 帮助</a>
+      </div>
       <div class="user-row">
         <span id="userName" class="uname hidden"></span>
         <button id="loginBtn" class="mini-btn">登录 / 注册</button>
         <button id="logoutBtn" class="mini-btn ghost hidden">退出</button>
+        <button id="delAcctBtn" class="mini-btn ghost danger hidden">注销</button>
       </div>
     </div>
   </aside>
@@ -145,6 +154,7 @@
               </select>
               <button id="chExportDocx" class="btn ghost small">💾 导出全文Word</button>
               <button id="chExportTxt" class="btn ghost small">导出txt</button>
+              <button id="chBackupAll" class="btn ghost small">📦 一键备份</button>
             </div>
             <textarea id="chEditor" placeholder="选择左侧章节开始写作。内容仅存本浏览器本地（IndexedDB），不经过服务器、不上云，自动保存。"></textarea>
             <div class="ch-meta"><span id="chCharCount">0 字</span><span class="privacy-note">🔒 论文仅存你自己的浏览器 · 服务器零存储</span></div>
@@ -155,7 +165,7 @@
       <!-- M12 进度打卡 -->
       <div id="view-progress" class="write-view hidden">
         <div class="panel">
-          <div class="panel-head"><b>📊 写作进度</b><span class="meta" id="pgThesis"></span></div>
+          <div class="panel-head"><b>📊 写作进度</b><span class="meta" id="pgThesis"></span><div class="spacer"></div><button id="pgExportBtn" class="btn ghost small">导出打卡.txt</button></div>
           <div class="pg-body">
             <div class="progress"><div id="pgBar"></div></div>
             <div class="stats-row" id="pgStats"></div>
@@ -233,6 +243,12 @@
     <div class="modal-head"><b id="modalTitle">登录定稿AI</b><button id="modalClose" class="btn ghost small">✕</button></div>
     <label>用户名<input id="authUser" placeholder="2-20位中英文/数字"></label>
     <label>密码<input id="authPass" type="password" placeholder="至少6位"></label>
+    <div id="authAgree" class="agree-box hidden">
+      <label class="agree-row"><input type="checkbox" id="agreeTerms"> 已阅读并同意 <a href="terms.html" target="_blank">《用户协议》</a></label>
+      <label class="agree-row"><input type="checkbox" id="agreePrivacy"> 已阅读并同意 <a href="privacy.html" target="_blank">《隐私政策》</a></label>
+      <label class="agree-row"><input type="checkbox" id="agreeEthics"> 已阅读并同意 <a href="ethics.html" target="_blank">《学术诚信使用规范》</a></label>
+      <label class="agree-row"><input type="checkbox" id="agreeAge"> 本人确认已年满 18 周岁</label>
+    </div>
     <div id="authMsg" class="msg"></div>
     <div class="row gap">
       <button id="authSubmit" class="btn primary">登录</button>
@@ -256,8 +272,69 @@
   </div>
 </div>
 
+<!-- 存量用户补签协议（B1） -->
+<div id="consentModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><b>📜 协议更新确认</b></div>
+    <p class="hint">v0.5 起施行《用户协议》《隐私政策》《学术诚信使用规范》。继续使用前请阅读并同意：</p>
+    <div class="agree-box">
+      <label class="agree-row"><a href="terms.html" target="_blank">《用户协议》</a></label>
+      <label class="agree-row"><a href="privacy.html" target="_blank">《隐私政策》</a>（含"AI 调用将输入发送至 DeepSeek"的告知）</label>
+      <label class="agree-row"><a href="ethics.html" target="_blank">《学术诚信使用规范》</a></label>
+      <label class="agree-row"><input type="checkbox" id="consentOk"> 我已阅读并同意以上全部协议</label>
+    </div>
+    <div class="msg" id="consentMsg"></div>
+    <div class="row gap"><button id="consentSubmit" class="btn primary" disabled>同意并继续</button></div>
+  </div>
+</div>
+
+<!-- 首次 AI 调用披露（B3） -->
+<div id="aiModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><b>🔐 AI 功能数据使用告知</b><button id="aiModalClose" class="btn ghost small">✕</button></div>
+    <p class="hint">使用 AI 功能时，<b>您输入的内容将发送至 DeepSeek 大模型处理</b>，仅用于本次生成；本产品服务端不在内存之外留存您的论文内容（本地优先架构）。若不同意发送，请勿使用 AI 功能（写作/大纲编辑/打卡/Word 导出不受影响）。详见<a href="privacy.html" target="_blank">《隐私政策》</a>第 3 节。</p>
+    <div class="msg" id="aiMsg"></div>
+    <div class="row gap"><button id="aiModalOk" class="btn primary">已知晓，继续</button></div>
+  </div>
+</div>
+
+<!-- 投诉与举报（C3，15日处理承诺） -->
+<div id="fbModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><b>📮 投诉与举报</b><button id="fbClose" class="btn ghost small">✕</button></div>
+    <p class="hint">我们承诺在 <b>15 日内</b>处理并反馈。举报违法内容请尽量提供链接或截图说明。</p>
+    <label>类型<select id="fbType"><option value="bug">功能问题</option><option value="content">内容投诉</option><option value="illegal">举报违法内容</option><option value="other">其他</option></select></label>
+    <label>联系方式（可选，用于反馈结果）<input id="fbContact" placeholder="邮箱/手机"></label>
+    <label>反馈内容<textarea id="fbContent" rows="4" placeholder="请描述问题…"></textarea></label>
+    <div class="msg" id="fbMsg"></div>
+    <div class="row gap"><button id="fbSubmit" class="btn primary">提交</button></div>
+  </div>
+</div>
+
+<!-- 新手引导（含学术诚信第 0 步） -->
+<div id="obModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><b id="obTitle">学术诚信须知</b><button id="obClose" class="btn ghost small">✕</button></div>
+    <div id="obBody" class="hint" style="text-align:left"></div>
+    <div class="row gap"><button id="obPrev" class="btn ghost">上一步</button><button id="obNext" class="btn primary">下一步</button></div>
+  </div>
+</div>
+
+<!-- 帮助与质量口径（F2） -->
+<div id="helpModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><b>❓ 帮助与质量口径</b><button id="helpClose" class="btn ghost small">✕</button></div>
+    <div class="hint" style="text-align:left">
+      <b>推荐流程</b>：选题助手 → 大纲生成 → 本地编写（Word 导出备份）→ 互译/校对 → 交稿检查报告。<br><br>
+      <b>质量口径（v0.5 起公开）</b>：互译抽检目标＝术语正确率 ≥95%、语义完整率 ≥98%（DoD D4-2）；引用核查与交稿检查为确定性规则引擎（零 AI 成本、同一文档多次检查结果一致）。<br><br>
+      <b>已知局限</b>：AI 输出可能出错，需人工核验；长文校对按 ≤2500 字分块；AI 服务波动已自动重试，极端情况请稍后重试；论文数据仅存本浏览器，换设备/清缓存前请先导出 Word 备份。<br><br>
+      <b>协议</b>：<a href="terms.html" target="_blank">用户协议</a> · <a href="privacy.html" target="_blank">隐私政策</a> · <a href="ethics.html" target="_blank">学术诚信规范</a>
+    </div>
+  </div>
+</div>
+
 <script src="vendor/docx.iife.js?v=1"></script>
 <script src="dingao-local.js?v=1"></script>
-<script src="app.js?v=10"></script>
+<script src="app.js?v=11"></script>
 </body>
 </html>

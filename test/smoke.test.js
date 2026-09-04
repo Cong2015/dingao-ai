@@ -1,4 +1,4 @@
-// 定稿AI 测试工程师 · 冒烟套件 v0.4（测试方案 V1.1 §5.3：TC-SM01~08）
+// 定稿AI 测试工程师 · 冒烟套件 v0.5（测试方案 V1.1 §5.3：TC-SM01~08）
 // 运行：node test/smoke.test.js   （默认打生产实例 http://localhost:8788，SMOKE_BASE 可改）
 // 验收方式（方案 §8）：8 条全过且总时长 ≤60 秒；不依赖真实 DeepSeek（AI 项不涉）；生产库零污染
 // 执行治理：写操作仅 tester_smoke_ 前缀账号，执行后清理（records 删除/logout/账号与会话行删除）
@@ -33,15 +33,15 @@ console.log('[冒烟] TC-SM 套件开始（生产实例 ' + BASE + '）');
 
 // ---- TC-SM01 服务健康 ----
 let r = await req('/api/health');
-check('TC-SM01 服务健康(200/version/privacy)', r.status === 200 && r.data && r.data.version === '0.4' && typeof r.data.privacy === 'string' && r.data.privacy.includes('不存储'), `status=${r.status} data=${JSON.stringify(r.data)}`);
+check('TC-SM01 服务健康(200/version/privacy)', r.status === 200 && r.data && r.data.version === '0.5' && typeof r.data.privacy === 'string' && r.data.privacy.includes('不存储'), `status=${r.status} data=${JSON.stringify(r.data)}`);
 
 // ---- TC-SM02 注册登录会话（tester_smoke_ 前缀） ----
 const uname = 'smk_' + Date.now().toString(36).slice(-5);   // ≤20位（用户名限制）
 const pwd = 'Smoke#2026';
 let token = '';
-r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: uname, password: pwd }) });
+r = await req('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: uname, password: pwd, agree: true }) });
 check('TC-SM02a 注册', r.status === 200, `status=${r.status} ${JSON.stringify(r.data)}`);
-r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uname, password: pwd }) });
+r = await req('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: uname, password: pwd, agree: true }) });
 if (r.status === 200 && r.data && r.data.token) token = r.data.token;
 check('TC-SM02b 登录', r.status === 200 && !!token, `status=${r.status}`);
 r = await req('/api/auth/me', { token });

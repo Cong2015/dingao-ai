@@ -53,8 +53,8 @@ else { check('TC-U03d 空串→空数组(方案口径)', false, `实现返回 ${
 const seqText = '正文先引用[2]再引用[1]，随后[4]。\n参考文献：\n[1] 作者A. 标题[J]. 期刊, 2020.\n[2] 作者B. 标题[J]. 期刊, 2021.\n[4] 作者D. 标题[J]. 期刊, 2022.';
 const cr = citeCheck(seqText);
 check('TC-U04 检出序号错位(顺序非递增+修正建议)', cr.seqErrors.length > 0 && cr.renumber && Object.keys(cr.renumber.mapping || {}).length > 0, JSON.stringify({ seq: cr.seqErrors, map: cr.renumber }));
-// 发现项：方案 TC-U04 预期"[1][2][4]检出缺3跳号"——实现不检测序号跳跃(1,2,4无3不报)，仅检测顺序错位与孤儿；口径差异报产品裁定
-check('TC-U04b 记录发现项:跳号检测语义差异(方案预期vs实现)', true, '(发现项登记:见执行记录)');
+// FIND-09已修复（v0.5）：文末文献序号跳号检测——[1][2][4] 应检出缺 3
+check('TC-U04b 检出序号跳号(缺3,FIND-09修复)', Array.isArray(cr.missingRefs) && cr.missingRefs.length === 1 && cr.missingRefs[0] === 3, JSON.stringify(cr.missingRefs));
 
 // ---- TC-U05 重复引用识别（同作者同年份）----
 const dupText = '正文引用[1][2]。\n参考文献：\n[1] 张三. 协同管理研究[J]. 工程管理学报, 2020.\n[2] 张三. 协同管理研究[J]. 工程管理学报, 2020.';

@@ -16,3 +16,6 @@ test/boundary.db
 test/security.db
 test/perf.db
 test/unit.db
+
+# v0.5 ethics
+test/ethics.db

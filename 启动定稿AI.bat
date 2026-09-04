@@ -1,5 +1,5 @@
 @echo off
-title 定稿AI v0.4 - 交稿之前，先定稿
+title 定稿AI v0.5 - 交稿之前，先定稿
 cd /d "%~dp0"
 
 REM node 路径兜底（系统PATH应有nodejs，此处双保险）
