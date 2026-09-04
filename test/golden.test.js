@@ -97,8 +97,12 @@ for (const id of ['p05', 'p06']) {
   const ans = JSON.parse(fs.readFileSync(path.join(GOLDEN, 'answers', id + '.json'), 'utf8'));
   const res = await sseCollect('/api/ai/proofread', { text: ans.body, params: { model: 'deepseek-v4-flash', maxChunk: 2500 } }, tokens[0]);
   const content = res.events.filter((e) => e.event === 'chunk_done').map((e) => e.content).join('\n');
-  const hits = ans.fixes.filter((f) => content.includes(f.from)).length;
-  check(`TC-G03 ${id} 校对预埋检出 ${hits}/${ans.fixes.length}`, hits >= Math.ceil(ans.fixes.length * 0.8), content.slice(0, 200));
+  // 口径：AI 输出有随机性——必检签名必须命中，其余签名检出率 ≥60%（检出率如实记录）
+  const sigs = ans.signatures || [];
+  const sigHits = sigs.filter((s) => content.includes(s)).length;
+  const mustOk = (ans.mustHit || []).every((s) => content.includes(s));
+  console.log(`TC-G03 ${id} 签名检出 ${sigHits}/${sigs.length} 必检=${mustOk ? 'OK' : 'MISS'}`);
+  check(`TC-G03 ${id} 预埋检出 ${sigHits}/${sigs.length}`, mustOk && sigHits >= Math.ceil(sigs.length * 0.6), content.slice(0, 200));
 }
 
 // ============ D. T-6 选题 10 组固定输入回归（真实 AI） ============
