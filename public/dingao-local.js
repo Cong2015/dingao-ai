@@ -121,6 +121,12 @@
   }
 
   // ---------- IndexedDB 封装（按账号分库：dingao_v04_<userId>，账号间天然隔离） ----------
+  // TC-B15修复（v0.5）：配额耗尽（QuotaExceededError）转友好提示，引导先导出备份
+  function friendlyErr(e) {
+    const sig = String((e && e.name) || '') + String((e && e.message) || '');
+    if (/quota/i.test(sig)) return new Error('浏览器存储空间不足（配额已满）：请先导出 Word 备份，再清理浏览器数据后继续');
+    return e;
+  }
   const idb = {
     _db: null,
     _dbName: '',
@@ -144,18 +150,18 @@
       });
     },
     async tx(userId, store, mode) { await this.open(userId); return this._db.transaction(store, mode).objectStore(store); },
-    async get(userId, store, key) { const o = await this.tx(userId, store, 'readonly'); return new Promise((res, rej) => { const r = o.get(key); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
-    async all(userId, store) { const o = await this.tx(userId, store, 'readonly'); return new Promise((res, rej) => { const r = o.getAll(); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error); }); },
-    async put(userId, store, val) { const o = await this.tx(userId, store, 'readwrite'); return new Promise((res, rej) => { const r = o.put(val); r.onsuccess = () => res(); r.onerror = () => rej(r.error); }); },
-    async del(userId, store, key) { const o = await this.tx(userId, store, 'readwrite'); return new Promise((res, rej) => { const r = o.delete(key); r.onsuccess = () => res(); r.onerror = () => rej(r.error); }); },
+    async get(userId, store, key) { const o = await this.tx(userId, store, 'readonly'); return new Promise((res, rej) => { const r = o.get(key); r.onsuccess = () => res(r.result); r.onerror = () => rej(friendlyErr(r.error)); }); },
+    async all(userId, store) { const o = await this.tx(userId, store, 'readonly'); return new Promise((res, rej) => { const r = o.getAll(); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(friendlyErr(r.error)); }); },
+    async put(userId, store, val) { const o = await this.tx(userId, store, 'readwrite'); return new Promise((res, rej) => { const r = o.put(val); r.onsuccess = () => res(); r.onerror = () => rej(friendlyErr(r.error)); }); },
+    async del(userId, store, key) { const o = await this.tx(userId, store, 'readwrite'); return new Promise((res, rej) => { const r = o.delete(key); r.onsuccess = () => res(); r.onerror = () => rej(friendlyErr(r.error)); }); },
     async bulk(userId, store, list) {
       const o = await this.tx(userId, store, 'readwrite');
       return new Promise((res, rej) => {
         o.clear();
         for (const v of list) o.put(v);
         o.transaction.oncomplete = () => res();
-        o.transaction.onerror = () => rej(o.transaction.error);
-        o.transaction.onabort = () => rej(new Error('IndexedDB 写入中断'));
+        o.transaction.onerror = () => rej(friendlyErr(o.transaction.error));
+        o.transaction.onabort = () => rej(friendlyErr(new Error('IndexedDB 写入中断')));
       });
     },
   };

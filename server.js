@@ -439,6 +439,95 @@ function formatCheck(meta) {
   return rows;
 }
 
+// ---------- v0.5.1 格式要求文件（上传学校模板 docx → 格式基线；对照检查·只检不改·确定性） ----------
+function parseFmtReqDocx(zip) {
+  const stylesXml = zip.getEntry('word/styles.xml')?.getData().toString('utf8') || '';
+  const docXml = zip.getEntry('word/document.xml')?.getData().toString('utf8') || '';
+  const styleBlock = (idRe) => {
+    const m = stylesXml.match(new RegExp(`<w:style\\b[^>]*w:styleId="${idRe}"[^>]*>([\\s\\S]*?)<\\/w:style>`));
+    if (!m) return null;
+    const b = m[1];
+    const f = b.match(/<w:rFonts[^>]*w:eastAsia="([^"]+)"/);
+    const sz = b.match(/<w:sz[^>]*w:val="(\d+)"/);
+    const line = b.match(/<w:spacing[^>]*w:line="(\d+)"/);
+    return { font: f ? f[1] : '', size: sz ? Number(sz[1]) : 0, line: line ? Number(line[1]) : 0 };
+  };
+  // 正文字体/字号/行距：默认段落样式（w:default="1"）→ Normal/正文 → docDefaults rPrDefault
+  let body = null;
+  const defM = stylesXml.match(/<w:style\b[^>]*w:type="paragraph"[^>]*w:default="1"[^>]*>([\s\S]*?)<\/w:style>/);
+  if (defM) {
+    const b = defM[1];
+    const f = b.match(/<w:rFonts[^>]*w:eastAsia="([^"]+)"/);
+    const sz = b.match(/<w:sz[^>]*w:val="(\d+)"/);
+    const line = b.match(/<w:spacing[^>]*w:line="(\d+)"/);
+    body = { font: f ? f[1] : '', size: sz ? Number(sz[1]) : 0, line: line ? Number(line[1]) : 0 };
+  }
+  if (!body || !body.font) body = styleBlock('(?:Normal|正文)') || body;
+  if (!body || !body.font) {
+    const dd = stylesXml.match(/<w:docDefaults>[\s\S]*?<w:rPrDefault>([\s\S]*?)<\/w:rPrDefault>/);
+    if (dd) {
+      const f = dd[1].match(/<w:rFonts[^>]*w:eastAsia="([^"]+)"/);
+      const sz = dd[1].match(/<w:sz[^>]*w:val="(\d+)"/);
+      body = { font: f ? f[1] : '', size: sz ? Number(sz[1]) : 0, line: 0 };
+    }
+  }
+  body = body || { font: '', size: 0, line: 0 };
+  // 标题样式（Heading1~3 / 标题1~3）
+  const headings = {};
+  for (const id of ['Heading1', 'Heading2', 'Heading3', '标题1', '标题2', '标题3', 'heading 1', 'heading 2', 'heading 3']) {
+    const h = styleBlock(id);
+    if (h && h.font) headings[id] = h;
+  }
+  // 页边距（sectPr，单位 twips → cm）
+  const sect = docXml.match(/<w:sectPr[\s\S]*?<\/w:sectPr>/);
+  const pgMar = {};
+  if (sect) {
+    const m = sect[0].match(/<w:pgMar([^>]*)\/>/);
+    if (m) for (const k of ['top', 'bottom', 'left', 'right']) { const v = m[1].match(new RegExp(`w:${k}="(\\d+)"`)); if (v) pgMar[k] = Math.round((Number(v[1]) / 567) * 100) / 100; }
+  }
+  return { bodyFont: body.font, bodySizePt: body.size ? Math.round((body.size / 2) * 10) / 10 : 0, lineSpacing: body.line, marginsCm: pgMar, headings };
+}
+function formatReqCheck(meta, req) {
+  const rows = [];
+  const okRow = (item, status, note) => rows.push({ item, status, note });
+  if (!meta || !req) {
+    okRow('格式符合性', 'na', '请先导入论文 .docx 并上传格式要求文件（学校模板）');
+    return rows;
+  }
+  // 正文字体
+  if (!req.bodyFont) okRow('正文字体', 'na', '格式要求文件未检出默认正文字体');
+  else if (!meta.fonts.length) okRow('正文字体', 'na', '论文中未检出字体（可能为扫描件转换）');
+  else if (meta.fonts.includes(req.bodyFont) && meta.fonts.length <= 2) okRow('正文字体', 'ok', `符合：正文使用 ${req.bodyFont}（论文共检出 ${meta.fonts.length} 种字体：${meta.fonts.join('、')}）`);
+  else okRow('正文字体', 'warn', `不符合：要求正文字体 ${req.bodyFont}，论文检出 ${meta.fonts.join('、')}（混用 ${meta.fonts.length} 种）`);
+  // 正文字号
+  if (!req.bodySizePt) okRow('正文字号', 'na', '格式要求文件未检出正文字号');
+  else if (!meta.sizes.length) okRow('正文字号', 'na', '论文中未检出字号');
+  else if (meta.sizes.includes(Math.round(req.bodySizePt * 2))) okRow('正文字号', 'ok', `符合：正文 ${req.bodySizePt}pt（论文检出字号：${meta.sizes.join('、')} 半磅）`);
+  else okRow('正文字号', 'warn', `不符合：要求正文 ${req.bodySizePt}pt（${Math.round(req.bodySizePt * 2)} 半磅），论文检出 ${meta.sizes.join('、')} 半磅`);
+  // 行距
+  if (!req.lineSpacing) okRow('正文行距', 'na', '格式要求文件未检出行距');
+  else if (!meta.lines.length) okRow('正文行距', 'na', '论文中未检出行距');
+  else if (meta.lines.every((l) => l === req.lineSpacing)) okRow('正文行距', 'ok', `符合：行距 ${Math.round((req.lineSpacing / 240) * 100) / 100} 倍`);
+  else okRow('正文行距', 'warn', `不符合：要求行距 ${Math.round((req.lineSpacing / 240) * 100) / 100} 倍（${req.lineSpacing}），论文检出 ${meta.lines.join('、')}`);
+  // 页边距
+  const ks = Object.keys(req.marginsCm || {});
+  if (!ks.length) okRow('页边距', 'na', '格式要求文件未检出页边距');
+  else if (!meta.pgMar || !Object.keys(meta.pgMar).length) okRow('页边距', 'na', '论文中未检出页边距');
+  else {
+    const cm = (t) => (t / 567).toFixed(2);
+    const diffs = ks.map((k) => `${k} ${cm(meta.pgMar[k] || 0)}cm(要求 ${req.marginsCm[k]}cm)`);
+    const allOk = ks.every((k) => Math.abs((meta.pgMar[k] || 0) / 567 - req.marginsCm[k]) <= 0.05);
+    okRow('页边距', allOk ? 'ok' : 'warn', `${allOk ? '符合' : '不符合'}：${diffs.join(' · ')}（±0.05cm 容差）`);
+  }
+  // 标题样式
+  if (!Object.keys(req.headings || {}).length) okRow('标题样式', 'na', '格式要求文件未定义标题样式');
+  else {
+    const hCount = Object.values(meta.headings).reduce((a, b) => a + b, 0);
+    okRow('标题样式', hCount > 0 ? 'ok' : 'warn', hCount > 0 ? `符合：论文使用标题样式段落 ${hCount} 个（${Object.entries(meta.headings).map(([k, v]) => `${k}×${v}`).join('、')}）` : '不符合：论文未使用标题样式（可能为手动加粗模拟，将影响目录自动生成）');
+  }
+  return rows;
+}
+
 // ---------- 应用 ----------
 const app = express();
 app.disable('x-powered-by');
@@ -659,13 +748,32 @@ app.post('/api/citecheck', toolRateLimit, (req, res) => {
   ok(res, citeCheck(t, ['gbt7714', 'gbt7714a', 'apa', 'mla'].includes(fmt) ? fmt : 'gbt7714'));
 });
 
-// 交稿检查报告（M8：引用核查＋docx基础格式检查·只检不改·确定性）
+// 交稿检查报告（M8：引用核查＋docx基础格式检查·只检不改·确定性；v0.5.1 支持格式要求文件对照）
 app.post('/api/checkreport', toolRateLimit, (req, res) => {
-  const { text, fmt, meta } = req.body || {};
+  const { text, fmt, meta, formatReq } = req.body || {};
   const t = String(text || '');
   if (!t) return res.status(400).json({ error: '文本为空' });
   if (t.length > 100000) return res.status(400).json({ error: '文本超长（≤10万字符）' });
-  ok(res, { cite: citeCheck(t, fmt), format: formatCheck(meta || null), rule: '规则引擎（确定性）·未调用LLM' });
+  const out = { cite: citeCheck(t, fmt), format: formatCheck(meta || null), rule: '规则引擎（确定性）·未调用LLM' };
+  if (formatReq && formatReq.bodyFont !== undefined) { out.formatReq = formatReqCheck(meta || null, formatReq); out.formatReqLabel = String(formatReq.label || '格式要求文件'); }
+  ok(res, out);
+});
+
+// 格式要求文件上传（v0.5.1：学校模板 docx 解析格式基线；确定性·零 AI 成本）
+app.post('/api/format-req', toolRateLimit, express.raw({ type: () => true, limit: '8mb' }), async (req, res) => {
+  const name = String(req.headers['x-filename'] || '');
+  const ext = path.extname(name).toLowerCase();
+  try {
+    if (ext === '.docx') {
+      const zip = new AdmZip(req.body);
+      if (!zip.getEntry('word/styles.xml')) return res.status(400).json({ error: '模板解析失败：缺少 styles.xml（请上传学校论文模板 .docx）' });
+      const baseline = parseFmtReqDocx(zip);
+      if (!baseline.bodyFont && !Object.keys(baseline.marginsCm).length) return res.status(400).json({ error: '模板中未检出格式基线（默认字体/页边距均缺失），请换用学校官方模板' });
+      ok(res, { label: name, baseline, note: '已解析模板格式基线（字体/字号/行距/页边距/标题样式）；交稿检查将对照逐项比对（只检不改）' });
+    } else if (ext === '.txt' || ext === '.md') {
+      ok(res, { label: name, baseline: null, note: '纯文本格式要求暂不支持自动解析（下一阶段 AI 结构化提取）；请上传学校论文模板 .docx' });
+    } else return res.status(400).json({ error: '支持格式：.docx（学校模板）/ .txt' });
+  } catch (e) { res.status(400).json({ error: `格式要求文件解析失败：${e.message}` }); }
 });
 
 // 我的Key（BYOK）
@@ -915,5 +1023,5 @@ app.listen(PORT, '::', () => {
   if (IS_TEST) console.log('[定稿AI v0.5] 测试模式');
 });
 
-// ---------- 测试钩子：纯函数导出（单元测试 TC-U01~U10 import 用；不影响服务行为） ----------
-export { chunkText, splitLongPara, citeCheck, docxMeta, formatCheck };
+// ---------- 测试钩子：纯函数导出（单元测试 TC-U01~U12 import 用；不影响服务行为） ----------
+export { chunkText, splitLongPara, citeCheck, docxMeta, formatCheck, parseFmtReqDocx, formatReqCheck };

@@ -19,3 +19,4 @@ test/unit.db
 
 # v0.5 ethics
 test/ethics.db
+test/golden.db

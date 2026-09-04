@@ -24,8 +24,10 @@ const api = {
     if (opt.body && typeof opt.body === 'string' && !opt.raw) headers['Content-Type'] = 'application/json';
     let r;
     try {
-      r = await fetch(API_BASE + path, { ...opt, headers });
-    } catch {
+      // FIND-01修复（v0.5）：请求级超时兜底（AI 长任务用 timeoutMs 放宽，默认浏览器长连接）
+      r = await fetch(API_BASE + path, { ...opt, headers, signal: opt.timeoutMs ? AbortSignal.timeout(opt.timeoutMs) : undefined });
+    } catch (e) {
+      if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw new Error('请求超时，请稍后重试（AI 服务波动时已自动重试，仍失败请稍候）');
       throw new Error('后端未连接：AI 功能与账号需要后端运行（写作/大纲/打卡/Word导出不受影响，仍可正常使用）');
     }
     const data = await r.json().catch(() => ({}));
@@ -44,6 +46,8 @@ let proofreadState = null;              // 分段校对进行中的状态
 const fnState = {};
 let translatePairs = null;              // M4 D4-1 逐句对照（当前译文句对）
 let lastReportData = null;              // M8 最近一次交稿检查报告数据（G-5 原稿副本导出用）
+let fmtReqBaseline = null;              // v0.5.1 格式要求文件基线（学校模板解析结果）
+let fmtReqLabel = '';
 
 // ============================================================
 // 功能注册表：左侧主要功能 → 主区细部功能
@@ -127,9 +131,12 @@ const FNS = {
           <option value="apa">APA 7th</option>
           <option value="mla">MLA 9th</option>
         </select></div>
-      <div class="opt-note ok" id="fmtMetaNote">${lastMeta ? '✅ 已载入 docx 格式元数据，将执行格式检查' : '💡 导入 .docx 文件后，此处将自动执行格式检查'}</div>`,
+      <div class="opt-note ok" id="fmtMetaNote">${lastMeta ? '✅ 已载入 docx 格式元数据，将执行格式检查' : '💡 导入 .docx 文件后，此处将自动执行格式检查'}</div>
+      <div class="opt-row"><span>格式要求文件</span><button id="fmtReqBtn" class="btn ghost small" style="flex:1">📂 上传学校模板.docx</button></div>
+      <input type="file" id="fmtReqInput" accept=".docx,.txt,.md" hidden>
+      <div class="opt-note" id="fmtReqNote">💡 上传学校《格式要求》模板后，交稿检查将对照格式基线逐项比对（只检不改）</div>`,
     run: async (text) => {
-      const d = await api.req('/api/checkreport', { method: 'POST', body: JSON.stringify({ text, fmt: $('#optFmt').value, meta: lastMeta }) });
+      const d = await api.req('/api/checkreport', { method: 'POST', body: JSON.stringify({ text, fmt: $('#optFmt').value, meta: lastMeta, formatReq: fmtReqBaseline ? { ...fmtReqBaseline, label: fmtReqLabel } : undefined }) });
       lastReportData = d;
       renderReport(d);
       return reportText(d);
@@ -259,6 +266,22 @@ function bindFnOpts(fn) {
     $('#recSearchBtn')?.addEventListener('click', () => loadRecords());
     $('#recSearch')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadRecords(); });
   }
+  // v0.5.1 格式要求文件上传（学校模板 docx → 格式基线）
+  if (fn === 'checkreport') {
+    $('#fmtReqBtn')?.addEventListener('click', () => $('#fmtReqInput').click());
+    $('#fmtReqInput')?.addEventListener('change', async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      try {
+        const buf = await f.arrayBuffer();
+        const d = await api.req('/api/format-req', { method: 'POST', headers: { 'X-Filename': encodeURIComponent(f.name) }, body: buf, raw: true });
+        fmtReqLabel = d.label || '格式要求文件';
+        fmtReqBaseline = d.baseline || null;
+        const n = $('#fmtReqNote');
+        if (n) { n.className = 'opt-note ' + (fmtReqBaseline ? 'ok' : ''); n.textContent = (fmtReqBaseline ? '✅ 已载入格式基线 · ' : '⚠️ ') + d.note; }
+      } catch (err) { const n = $('#fmtReqNote'); if (n) { n.className = 'opt-note'; n.textContent = '❌ ' + err.message; } }
+      e.target.value = '';
+    });
+  }
 }
 
 // ============================================================
@@ -365,7 +388,8 @@ async function runStream(path, text, extraParams) {
     temperature: Number($('#optTemp')?.value || 0.3),
     ...extraParams,
   };
-  const r = await fetch(API_BASE + path, { method: 'POST', headers, body: JSON.stringify({ text, params }) });
+  const r = await fetch(API_BASE + path, { method: 'POST', headers, body: JSON.stringify({ text, params }), signal: AbortSignal.timeout(300000) })
+    .catch((e) => { if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw new Error('请求超时（AI 生成未在 5 分钟内完成），请稍后重试或缩短输入'); throw e; });
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `请求失败(${r.status})`); }
   const reader = r.body.getReader(); const dec = new TextDecoder();
   if (startFn === currentFn) $('#resultBox').innerHTML = '<div></div>';
@@ -468,7 +492,8 @@ async function runProofread(text) {
     temperature: Number($('#optTemp')?.value || 0.3),
     maxChunk: Number($('#optChunk')?.value || 2500),
   };
-  const r = await fetch(API_BASE + '/api/ai/proofread', { method: 'POST', headers, body: JSON.stringify({ text, params }) });
+  const r = await fetch(API_BASE + '/api/ai/proofread', { method: 'POST', headers, body: JSON.stringify({ text, params }), signal: AbortSignal.timeout(600000) })
+    .catch((e) => { if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw new Error('校对请求超时（10 分钟），请稍后重试或缩短文本'); throw e; });
   if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `请求失败(${r.status})`); }
   proofreadState = { chunks: [], chunkTexts: [], chunkContents: [], allFixes: [], chunkStatus: [], finished: false };
   const box = $('#resultBox');
@@ -573,7 +598,9 @@ async function retryChunk(index) {
   const headers = { Authorization: `Bearer ${api.token}`, 'Content-Type': 'application/json' };
   const card = $('#chunk-' + index);
   card.querySelector('.chunk-head').innerHTML = `<b>第 ${index + 1} 块</b><span>重试中…</span><span class="spacer" style="flex:1"></span>`;
-  const r = await fetch(API_BASE + '/api/ai/proofread-chunk', { method: 'POST', headers, body: JSON.stringify({ text, params: { model: $('#optModel')?.value || 'deepseek-v4-flash', temperature: Number($('#optTemp')?.value || 0.3) } }) });
+  const r = await fetch(API_BASE + '/api/ai/proofread-chunk', { method: 'POST', headers, body: JSON.stringify({ text, params: { model: $('#optModel')?.value || 'deepseek-v4-flash', temperature: Number($('#optTemp')?.value || 0.3) } }), signal: AbortSignal.timeout(180000) })
+    .catch((e) => { alert('重试失败：' + (e && (e.name === 'TimeoutError' || e.name === 'AbortError') ? '请求超时，请稍后再试' : e.message)); return null; });
+  if (!r) return;
   if (!r.ok) { const d = await r.json().catch(() => ({})); alert('重试失败：' + (d.error || r.status)); return; }
   const reader = r.body.getReader(); const dec = new TextDecoder();
   let buf = '', content = '', truncated = false;
@@ -666,6 +693,10 @@ function renderCite(d) {
 function reportText(d) {
   let out = `【交稿检查报告】\n生成时间：${new Date().toLocaleString()}\n（${d.rule}）\n\n一、引用核查\n${d.cite.issues.join('\n')}\n\n二、基础格式检查\n`;
   for (const row of d.format) out += `· ${row.item}：${row.status === 'ok' ? '正常' : row.status === 'warn' ? '需注意' : '未检查'} —— ${row.note}\n`;
+  if (d.formatReq) {
+    out += `\n三、格式符合性（对照「${d.formatReqLabel || '格式要求文件'}」）\n`;
+    for (const row of d.formatReq) out += `· ${row.item}：${row.status === 'ok' ? '符合' : row.status === 'warn' ? '不符合' : '无法判断'} —— ${row.note}\n`;
+  }
   return out;
 }
 function renderReport(d) {
@@ -684,7 +715,15 @@ function renderReport(d) {
   html += `</ul><div class="section-title">二、基础格式检查（只检不改）</div><table class="fmt-table">
     <tr><th style="width:110px">检查项</th><th style="width:80px">结论</th><th>说明</th></tr>`;
   for (const row of d.format) html += `<tr><td>${esc(row.item)}</td><td>${pill(row.status)}</td><td>${esc(row.note)}</td></tr>`;
-  html += `</table><div class="section-title">三、机械校对（分段校对）</div>`;
+  html += `</table>`;
+  // v0.5.1 格式符合性：对照上传的学校模板基线（只检不改）
+  if (d.formatReq) {
+    html += `<div class="section-title">三、格式符合性（对照「${esc(d.formatReqLabel || '格式要求文件')}」·只检不改）</div><table class="fmt-table">
+      <tr><th style="width:110px">检查项</th><th style="width:80px">结论</th><th>说明</th></tr>`;
+    for (const row of d.formatReq) html += `<tr><td>${esc(row.item)}</td><td>${pill(row.status)}</td><td>${esc(row.note)}</td></tr>`;
+    html += `</table>`;
+  }
+  html += `<div class="section-title">${d.formatReq ? '四' : '三'}、机械校对（分段校对）</div>`;
   // M8 G-1：校对汇总入口并入交稿报告
   if (proofreadState && proofreadState.chunkContents && proofreadState.chunkContents.length) {
     const done = proofreadState.chunkStatus.filter((s) => s === 'ok' || s === 'warn').length;
@@ -1020,7 +1059,7 @@ $('#tpGenBtn').addEventListener('click', async () => {
       interests: $('#tpInterests').value.trim(),
       count: Number($('#tpCount').value),
     };
-    const d = await api.req('/api/topics/suggest', { method: 'POST', body: JSON.stringify({ form }) });
+    const d = await api.req('/api/topics/suggest', { method: 'POST', body: JSON.stringify({ form }), timeoutMs: 200000 });
     topicLocal = { topics: d.topics, history: [{ role: 'user', content: problem }, { role: 'assistant', content: '已生成 ' + d.topics.length + ' 个选题' }], form };
     await L().saveTopicSession(localId(), topicLocal);
     renderTopicCards(d.topics);
@@ -1073,7 +1112,7 @@ async function topicAsk() {
     $('#tpAskBtn').disabled = true;
     $('#tpAskBtn').textContent = '思考中…';
     const history = (topicLocal.history || []).concat([{ role: 'user', content: q }]);
-    const d = await api.req('/api/topics/iterate', { method: 'POST', body: JSON.stringify({ history, question: q }) });
+    const d = await api.req('/api/topics/iterate', { method: 'POST', body: JSON.stringify({ history, question: q }), timeoutMs: 200000 });
     topicLocal.topics = d.topics;
     topicLocal.history = history.concat([{ role: 'assistant', content: '已更新 ' + d.topics.length + ' 个选题建议' }]);
     await L().saveTopicSession(localId(), topicLocal);
@@ -1189,7 +1228,7 @@ $('#olGenBtn').addEventListener('click', async () => {
   $('#olStatus').textContent = 'AI 生成中（约 20-60 秒，输入仅内存中转、服务端不存储）…';
   $('#olGenBtn').disabled = true;
   try {
-    const d = await api.req('/api/outline/generate', { method: 'POST', body: JSON.stringify({ title, extra: $('#olGenExtra').value.trim() }) });
+    const d = await api.req('/api/outline/generate', { method: 'POST', body: JSON.stringify({ title, extra: $('#olGenExtra').value.trim() }), timeoutMs: 200000 });
     generatedOutline = d.chapters;
     $('#olApplyGen').classList.remove('hidden');
     $('#olStatus').textContent = `✅ 已生成 ${d.chapters.length} 章大纲（${d.model}）· 点击「应用生成的大纲」写入本浏览器（将替换当前大纲）`;

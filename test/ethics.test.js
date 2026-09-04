@@ -8,13 +8,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BASE = 'http://127.0.0.1:8792';
+const BASE = 'http://127.0.0.1:8794';
 const DB = path.join(__dirname, 'ethics.db');
 try { fs.rmSync(DB, { force: true }); } catch {}
 
 const server = spawn(process.execPath, ['server.js'], {
   cwd: path.join(__dirname, '..'),
-  env: { ...process.env, PORT: '8792', DINGAO_TEST: '1', DB_PATH: DB },
+  env: { ...process.env, PORT: '8794', DINGAO_TEST: '1', DB_PATH: DB },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 server.stderr.on('data', () => {});
@@ -103,14 +103,6 @@ check('TC-EC06a github.io Origin→回显ACAO', r.headers.get('access-control-al
 r = await req('/api/health', { headers: { Origin: 'https://evil.example.com' } });
 check('TC-EC06b 白名单外Origin→不回ACAO(浏览器拦截)', !r.headers.get('access-control-allow-origin'), String(r.headers.get('access-control-allow-origin')));
 
-// ---- TC-EC07 工具端点IP限流（FIND-05，独立于SC05c复证）----
-let got429 = 0;
-for (let i = 0; i < 65; i++) {
-  const rr = await req('/api/citecheck', { method: 'POST', body: JSON.stringify({ text: '限流[1]' }) });
-  if (rr.status === 429) { got429 = i + 1; break; }
-}
-check('TC-EC07 工具端点第' + got429 + '次触发429', got429 > 0, '未触发429');
-
 // ---- TC-EC08 AI 标识（前端静态，A4/C4）----
 const appjs = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
@@ -130,10 +122,30 @@ check('TC-EC09d 学术诚信规范含禁止直接提交', ethics.includes('禁�
 check('TC-EC10 注册页三协议勾选+年龄确认(静态)', html.includes('agreeTerms') && html.includes('agreePrivacy') && html.includes('agreeEthics') && html.includes('agreeAge'), '');
 
 // ---- TC-EC11 v4-pro 移除 UI（收敛项，静态）----
+check('TC-EC11a 前端请求超时兜底FIND-01(静态)', appjs.includes('AbortSignal.timeout') && appjs.includes('timeoutMs'), '');
+check('TC-EC11b IndexedDB配额友好提示B15(静态)', fs.readFileSync(path.join(__dirname, '..', 'public', 'dingao-local.js'), 'utf8').includes('quota'), '');
 check('TC-EC11 模型下拉仅剩v4-flash(收敛)', appjs.includes('deepseek-v4-flash') && !appjs.includes('value="deepseek-v4-pro"'), '');
 
 // ---- TC-EC12 前端无论文存储端点引用（契约红线，静态）----
 check('TC-EC12 前端不引用论文存储端点', !/\/api\/thes|\/api\/chapters|\/api\/checkins|\/api\/progress/.test(appjs), '');
+
+// ---- TC-EC13 格式要求文件（v0.5.1：模板解析+符合性对照，确定性）----
+const { default: AdmZip } = await import('adm-zip');
+const tz = new AdmZip();
+tz.addFile('word/styles.xml', Buffer.from('<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:rPr><w:rFonts w:eastAsia="黑体"/><w:sz w:val="32"/></w:rPr></w:style></w:styles>', 'utf8'));
+tz.addFile('word/document.xml', Buffer.from('<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/><w:sectPr><w:pgMar w:top="1701" w:bottom="1417" w:left="1701" w:right="1417"/></w:sectPr></w:body></w:document>', 'utf8'));
+r = await req('/api/format-req', { method: 'POST', headers: { 'X-Filename': 'tpl.docx' }, body: tz.toBuffer(), raw: true });
+check('TC-EC13a 模板上传解析→基线(宋体/12pt/360)', r.status === 200 && r.data && r.data.baseline && r.data.baseline.bodyFont === '宋体' && r.data.baseline.bodySizePt === 12 && r.data.baseline.lineSpacing === 360, `status=${r.status} ${JSON.stringify(r.data).slice(0, 120)}`);
+r = await req('/api/checkreport', { method: 'POST', body: JSON.stringify({ text: '测试[1]。', meta: { pgMar: { top: 1701, bottom: 1417, left: 1701, right: 1417 }, fonts: ['宋体'], sizes: [24], lines: [360], headings: { Heading1: 1 }, hasPageNum: true }, formatReq: { ...(r.data && r.data.baseline), label: 'tpl.docx' } }) });
+check('TC-EC13b 符合性对照→5行全符合', r.status === 200 && Array.isArray(r.data.formatReq) && r.data.formatReq.length === 5 && r.data.formatReq.every((x) => x.status === 'ok'), JSON.stringify(r.data && r.data.formatReq && r.data.formatReq.map((x) => x.item + ':' + x.status)));
+
+// ---- TC-EC07 工具端点IP限流（FIND-05，置于所有工具用例之后执行）----
+let got429 = 0;
+for (let i = 0; i < 65; i++) {
+  const rr = await req('/api/citecheck', { method: 'POST', body: JSON.stringify({ text: '限流[1]' }) });
+  if (rr.status === 429) { got429 = i + 1; break; }
+}
+check('TC-EC07 工具端点第' + got429 + '次触发429', got429 > 0, '未触发429');
 
 server.kill();
 console.log(`\n[伦理合规] 结果：${pass} 通过 / ${fail} 失败（共 ${pass + fail} 项断言）`);

@@ -10,7 +10,7 @@ process.env.DINGAO_TEST = '1';
 const srv = await import('../server.js');
 await import('../public/dingao-local.js').catch(() => {});
 const L = globalThis.DingaoLocal;
-const { chunkText, splitLongPara, citeCheck, docxMeta, formatCheck } = srv;
+const { chunkText, splitLongPara, citeCheck, docxMeta, formatCheck, parseFmtReqDocx, formatReqCheck } = srv;
 
 let pass = 0, fail = 0;
 const findings = [];
@@ -99,6 +99,23 @@ if (L) {
   check('TC-U10 目标0不除零(percent=0且不抛错)', p0.percent === 0, JSON.stringify(p0));
   const pn = L.computeProgress([{ content: '研'.repeat(100) }, { content: '究'.repeat(50) }], 30000);
   check('TC-U10b 公式精确匹配(150/30000=0.5%)', pn.total_words === 150 && pn.percent === 0.5, JSON.stringify(pn));
+
+// ---- TC-U11 格式要求文件解析（parseFmtReqDocx，v0.5.1 纯函数）----
+const tplZip = new AdmZip();
+tplZip.addFile('word/styles.xml', Buffer.from('<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:eastAsia="宋体" w:ascii="Times New Roman"/><w:sz w:val="24"/></w:rPr><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:rPr><w:rFonts w:eastAsia="黑体"/><w:sz w:val="32"/></w:rPr></w:style></w:styles>', 'utf8'));
+tplZip.addFile('word/document.xml', Buffer.from('<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/><w:sectPr><w:pgMar w:top="1701" w:bottom="1417" w:left="1701" w:right="1417"/></w:sectPr></w:body></w:document>', 'utf8'));
+const reqBase = parseFmtReqDocx(tplZip);
+check('TC-U11a 模板解析:正文字体/字号/行距', reqBase.bodyFont === '宋体' && reqBase.bodySizePt === 12 && reqBase.lineSpacing === 360, JSON.stringify(reqBase));
+check('TC-U11b 模板解析:页边距cm与标题样式', reqBase.marginsCm.top === 3 && reqBase.headings.Heading1 && reqBase.headings.Heading1.font === '黑体', JSON.stringify(reqBase.marginsCm));
+
+// ---- TC-U12 格式符合性对照（formatReqCheck，v0.5.1 纯函数·只检不改）----
+const metaOK = { pgMar: { top: 1701, bottom: 1417, left: 1701, right: 1417 }, fonts: ['宋体'], sizes: [24], lines: [360], headings: { Heading1: 2 }, hasPageNum: true };
+const rowsOK = formatReqCheck(metaOK, reqBase);
+check('TC-U12a 完全符合→5项全ok', rowsOK.length === 5 && rowsOK.every((r) => r.status === 'ok'), JSON.stringify(rowsOK.map((r) => r.status)));
+const metaBad = { pgMar: { top: 2268, bottom: 1417, left: 1701, right: 1417 }, fonts: ['黑体', '仿宋', '宋体'], sizes: [21, 28], lines: [240, 360], headings: {}, hasPageNum: false };
+const rowsBad = formatReqCheck(metaBad, reqBase);
+check('TC-U12b 违规样本→字体/字号/行距/边距/标题全warn', rowsBad.filter((r) => r.status === 'warn').length === 5, JSON.stringify(rowsBad.map((r) => r.item + ':' + r.status)));
+check('TC-U12c 空meta→无法判断不崩溃', formatReqCheck(null, reqBase)[0].status === 'na' && formatReqCheck(metaOK, null)[0].status === 'na');
 } else { check('TC-U10 进度函数存在', false, '本地库未加载'); }
 
 console.log(`\n[单元] 结果：${pass} 通过 / ${fail} 失败（共 ${pass + fail} 项断言）`);
