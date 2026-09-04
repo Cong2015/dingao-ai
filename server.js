@@ -999,9 +999,13 @@ app.get('/api/admin/stats', (req, res) => {
 // 健康与能力清单
 function lanUrls() {
   const out = [];
+  const isPrivate = (ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
   for (const addrs of Object.values(os.networkInterfaces())) {
     for (const a of addrs || []) {
-      if (a.family === 'IPv4' && !a.internal) out.push(`http://${a.address}:${PORT}`);
+      if (a.family !== 'IPv4' || a.internal) continue;
+      // 云端生产（NODE_ENV=production）：VPC 内网 IP 对用户无意义，过滤；本机开发照常显示局域网地址
+      if (process.env.NODE_ENV === 'production' && isPrivate(a.address)) continue;
+      out.push(`http://${a.address}:${PORT}`);
     }
   }
   return [...new Set(out)];
