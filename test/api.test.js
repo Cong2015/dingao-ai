@@ -1,4 +1,4 @@
-// 定稿AI 测试工程师 · 自动化测试套件 v0.4（功能/合规/安全/AI场景·本地优先架构）
+// 定稿AI 测试工程师 · 自动化测试套件 v0.5（功能/合规/安全/AI场景·本地优先架构）
 // 运行：node test/api.test.js  （自动拉起 8789 测试实例，结束后回收）
 // v0.2/v0.3 已有：M5分段校对E2E回归 / 切块完整性 / M2序号修正 / M8交稿检查报告 / 选题AI / 大纲AI
 // v0.4 变更：论文数据移入用户浏览器 IndexedDB——服务端存储端点全删（404断言）、测试库无论文表（sqlite_master断言）、
@@ -89,7 +89,7 @@ check('TC-06 未登录访问被拒(401)', r.status === 401);
 r = await req('/api/auth/me', { token });
 check('TC-07 登录态获取用户信息', r.status === 200 && r.data.username === uname);
 r = await req('/api/health');
-check('TC-08 健康检查(无需登录,v0.4)', r.status === 200 && r.data.hasKey === true && r.data.version === '0.4' && Array.isArray(r.data.lanUrls) && String(r.data.privacy).includes('不存储'));
+check('TC-08 健康检查(无需登录,v0.5)', r.status === 200 && r.data.hasKey === true && r.data.version === '0.5' && Array.isArray(r.data.lanUrls) && String(r.data.privacy).includes('不存储'));
 
 // ===== 用例组2：引用核查（规则引擎·确定性） =====
 console.log('[测试] 组2 引用核查规则引擎…');
