@@ -1,0 +1,43 @@
+#!/bin/sh
+# 定稿AI pre-commit 钩子：阻止 API 密钥与敏感文件进入公开仓库
+# 经 core.hooksPath=.githooks 生效；新克隆后需执行：
+#   git config core.hooksPath .githooks
+# 确属误报时可用 git commit --no-verify 跳过（请先确认不含机密，公开仓库提交不可逆）
+
+RED=$(tput setaf 1 2>/dev/null || true)
+BOLD=$(tput bold 2>/dev/null || true)
+NC=$(tput sgr0 2>/dev/null || true)
+fail=0
+
+# ---- 1) 敏感文件路径拦截（防 git add -f 绕过 .gitignore）----
+bad=$(git diff --cached --name-only --diff-filter=ACM | grep -Ei '(^|/)\.env$|(^|/)(dingao\.db|secret\.key|key\.txt|API\.txt|cpolar\.yml|id_rsa.*)$|\.(db|sqlite3?|pem|p12|pfx|key)$')
+if [ -n "$bad" ]; then
+  printf '%s%s%s\n' "${RED}${BOLD}" "✗ 提交被阻止：检测到敏感文件（数据库/密钥类），禁止进入公开仓库：" "${NC}"
+  printf '    %s\n' $bad
+  fail=1
+fi
+
+# ---- 2) 暂存内容密钥模式扫描（DeepSeek/GitHub/云厂商常见格式）----
+hits=$(printf '%s\n' \
+  'sk-[A-Za-z0-9]{28,}' \
+  '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+  'ghp_[A-Za-z0-9]{36}' \
+  'github_pat_[A-Za-z0-9_]{22,}' \
+  'AKIA[0-9A-Z]{16}' \
+  'AIza[0-9A-Za-z_-]{35}' \
+  'xox[baprs]-[A-Za-z0-9-]{10,}' \
+  | while IFS= read -r pat; do
+      [ -n "$pat" ] && git grep --cached -nE "$pat" 2>/dev/null
+    done)
+if [ -n "$hits" ]; then
+  printf '%s%s%s\n' "${RED}${BOLD}" "✗ 提交被阻止：暂存内容中检测到疑似 API 密钥：" "${NC}"
+  printf '%s\n' "$hits"
+  printf '%s\n' "    → 请从代码中移除密钥（改用环境变量 / config/key.txt〔已 gitignore〕/ 用户自配 Key）"
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  printf '%s\n' "    → 确属误报时：git commit --no-verify（慎用）"
+  exit 1
+fi
+exit 0

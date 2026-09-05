@@ -28,7 +28,7 @@
 
 ```bash
 npm install            # Node ≥ 22（node:sqlite 内置）
-node server.js         # 密钥读取：环境变量 > config/key.txt > config/key.txt
+node server.js         # 密钥读取：环境变量 > 仓库外本地 API.txt > config/key.txt（后两者勿提交）
 ```
 
 - 本机访问：http://localhost:8788
@@ -64,6 +64,16 @@ node server.js         # 密钥读取：环境变量 > config/key.txt > config/k
 
 > ⚠️ 本地存储提示：论文存在浏览器里，换电脑/换浏览器/清空浏览器数据将看不到（可随时导出 Word 备份）；Safari 隐私模式下 IndexedDB 受限，请使用普通模式。
 
+## 🔑 提交前密钥扫描（pre-commit 钩子）
+
+仓库自带提交前扫描钩子（`.githooks/pre-commit`，经 `core.hooksPath` 生效），每次 `git commit` 自动拦截：
+
+1. **敏感文件**：`*.db` / `secret.key` / `key.txt` / `.env` / `*.pem` / `cpolar.yml` 等——即使 `git add -f` 强行添加也会被拦下
+2. **暂存内容中的密钥格式**：DeepSeek `sk-` 密钥、GitHub PAT、AWS/Google API Key、SSH 私钥等常见格式
+
+- 新克隆后启用：`git config core.hooksPath .githooks`
+- 确属误报时：`git commit --no-verify`（慎用——公开仓库的提交不可撤回）
+
 ## 📂 目录
 
 ```
@@ -71,6 +81,7 @@ dingao/
 ├─ server.js          # 后端（认证/写作四模块M9-M12/AI工具/规则引擎/记录/导入导出）
 ├─ public/            # 前端（index.html / app.js / styles.css）
 ├─ test/              # 自动化测试（102条）与测试计划
+├─ .githooks/         # pre-commit 密钥扫描钩子（core.hooksPath 指向此处）
 ├─ config/            # 可选密钥文件（key.txt，勿提交）
 ├─ 启动定稿AI.bat      # 启动脚本（防火墙放行＋看门狗自动重启＋开浏览器）
 ├─ 自启动服务.bat      # 开机自启辅助脚本（由启动文件夹 vbs 静默调用，可选安装）
