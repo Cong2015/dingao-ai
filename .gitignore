@@ -20,3 +20,13 @@ test/unit.db
 # v0.5 ethics
 test/ethics.db
 test/golden.db
+
+# 系统与编辑器产物
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+.vscode/
+.idea/
+*.tmp
+~$*

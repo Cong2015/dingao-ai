@@ -26,10 +26,13 @@ const PORT = Number(process.env.PORT || 8788);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'dingao.db');
 const IS_TEST = !!process.env.DINGAO_TEST;
 
-// ---------- DeepSeek 密钥（仅服务端；环境变量 > API.txt > config/key.txt） ----------
+// ---------- DeepSeek 密钥（仅服务端；环境变量 DEEPSEEK_API_KEY > DINGAO_KEY_FILE 指定文件 > config/key.txt） ----------
 function loadApiKey() {
   if (process.env.DEEPSEEK_API_KEY) return process.env.DEEPSEEK_API_KEY.trim();
-  for (const p of ['config/key.txt', path.join(__dirname, 'config/key.txt')]) {
+  const keyFiles = process.env.DINGAO_KEY_FILE
+    ? [process.env.DINGAO_KEY_FILE]
+    : [path.join(__dirname, 'config', 'key.txt')];
+  for (const p of keyFiles) {
     try { const k = fs.readFileSync(p, 'utf8').trim(); if (k) return k; } catch {}
   }
   return '';

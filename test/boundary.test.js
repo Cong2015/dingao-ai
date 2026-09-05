@@ -194,7 +194,7 @@ check('TC-B16 导入截断至100000字符', r.status === 200 && r.data.chars ===
 
 // ---- TC-B18/B19 maxChunk钳制（真实key短调用，start事件回显）----
 try {
-  const apiKey = fs.readFileSync('config/key.txt', 'utf8').trim();
+  const apiKey = process.env.DEEPSEEK_API_KEY || (() => { try { return fs.readFileSync(path.join(__dirname, '..', 'config', 'key.txt'), 'utf8').trim(); } catch { return ''; } })();
   if (apiKey) {
     r = await req('/api/apikey', { method: 'PUT', body: JSON.stringify({ key: apiKey }), token, timeoutMs: 90000 });
     const hasKey = r.status === 200;

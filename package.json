@@ -1,21 +1,30 @@
-﻿{
-    "name":  "dingao-ai",
-    "version":  "1.0.0",
-    "description":  "定稿AI - 研究生论文AI辅助系统(开发版)",
-    "main":  "index.js",
-    "scripts":  {
-                    "test":  "echo \"Error: no test specified\" \u0026\u0026 exit 1"
-                },
-    "keywords":  [
-
-                 ],
-    "author":  "",
-    "license":  "ISC",
-    "dependencies":  {
-                         "adm-zip":  "^0.6.0",
-                         "docx":  "^9.7.1",
-                         "express":  "^5.2.1",
-                         "pdf-parse":  "^2.4.5"
-                     },
-    "type":  "module"
+{
+  "name": "dingao-ai",
+  "version": "0.5.1",
+  "description": "定稿AI - 研究生论文AI辅助系统（本地优先架构：论文只存用户浏览器，服务端零论文存储）",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/unit.test.js && node test/boundary.test.js && node test/security.test.js && node test/contract.test.js && node test/ethics.test.js && node test/perf.test.js",
+    "test:ai": "node test/api.test.js",
+    "test:golden": "node test/golden.test.js",
+    "test:smoke": "node test/smoke.test.js"
+  },
+  "keywords": [
+    "论文",
+    "AI",
+    "DeepSeek",
+    "local-first",
+    "本地优先",
+    "IndexedDB"
+  ],
+  "author": "定稿AI产品组 (DingGao AI)",
+  "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.6.0",
+    "docx": "^9.7.1",
+    "express": "^5.2.1",
+    "pdf-parse": "^2.4.5"
+  }
 }

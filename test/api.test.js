@@ -163,7 +163,7 @@ check('TC-36 密码哈希落库(无明文)', !dbRaw.includes(pw));
 
 // ===== 用例组7：BYOK 密钥体系 =====
 console.log('[测试] 组7 BYOK密钥体系…');
-const realKey = fs.readFileSync('config/key.txt', 'utf8').trim();
+const realKey = process.env.DEEPSEEK_API_KEY || (() => { try { return fs.readFileSync(path.join(__dirname, '..', 'config', 'key.txt'), 'utf8').trim(); } catch { return ''; } })();
 r = await req('/api/apikey', { method: 'PUT', body: JSON.stringify({ key: 'not-a-key' }), token });
 check('TC-37 无效格式Key被拒(400)', r.status === 400);
 r = await req('/api/apikey', { method: 'PUT', body: JSON.stringify({ key: 'sk-invalidkey000000000' }), token: r2l.data.token });
