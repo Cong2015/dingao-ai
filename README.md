@@ -53,7 +53,7 @@ node server.js         # 密钥读取：环境变量 DEEPSEEK_API_KEY > DINGAO_K
 
 ### 关于 .bat 脚本
 
-三个 .bat 为 **GBK 编码**（Windows cmd 中文环境原生编码）——在 GitHub 网页预览可能显示乱码，属正常现象；克隆到 Windows 后双击即可正常使用。`启动内网穿透.bat` 内含本机 cpolar 安装路径等机器相关配置，复制到其他电脑时按需修改。
+三个 .bat 为 **GBK 编码**（Windows cmd 中文环境原生编码）——在 GitHub 网页预览可能显示乱码，属正常现象；克隆到 Windows 后双击即可正常使用。`启动内网穿透.bat` 中 cpolar 路径以 `%USERPROFILE%` 表示（首次使用需先注册 cpolar 账号并执行 authtoken 认证）；如 cpolar 安装在其他位置请按需修改。
 
 ### 常见问题：网址打不开 / 其他电脑连不上
 
@@ -65,7 +65,7 @@ node server.js         # 密钥读取：环境变量 DEEPSEEK_API_KEY > DINGAO_K
 
 ### github.io 静态镜像
 
-`public/app.js` 顶部 `REMOTE_API` 指向公网后端地址：当页面运行在 `github.io` 域名下时，前端自动跨域调用该后端；本地/局域网访问不受影响（同源调用）。gh-pages 分支只含 public/ 静态文件，作为纯前端镜像部署。
+`public/app.js` 顶部 `REMOTE_API` 用于 github.io 静态镜像：**部署前填你自己的公网后端地址**（默认为空）；当页面运行在 `github.io` 域名下时，前端自动跨域调用该后端；本地/局域网访问不受影响（同源调用）。gh-pages 分支只含 public/ 静态文件，作为纯前端镜像部署。
 
 ## 🧪 测试
 

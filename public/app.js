@@ -2,8 +2,10 @@
 // 布局：左侧主要功能导航 + 主区（编辑器/细部选项/结果）
 'use strict';
 const $ = (s) => document.querySelector(s);
-// API 地址：github.io 静态托管时跨域指向公网后端（cpolar 隧道）；本地/局域网同源为空串
-const REMOTE_API = 'https://YOUR-DOMAIN';
+// API 地址：页面运行在 github.io 静态镜像上时，跨域调用这里配置的公网后端；
+// 部署 gh-pages 前填你自己的后端地址（如 'https://dingao.example.com'，不带末尾斜杠）；
+// 本地/局域网访问走同源（API_BASE 为空串），无需修改
+const REMOTE_API = '';
 const API_BASE = /github\.io$/i.test(location.hostname) ? REMOTE_API : '';
 // 本地模式（未登录/后端离线）：写作/大纲/进度/打卡/Word导出全部可用（数据存本浏览器，分库 guest）；
 // AI 功能与账号需要后端运行，未连接时给出明确提示
